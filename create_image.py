@@ -185,6 +185,11 @@ def main():
 
     print("🕉️ Generating deep Krishna line from Gemini...")
     line = generate_unique_krishna_line()
+    if not line:
+        # extra safety, should basically never happen now
+        line = "In Krishna's embrace, your heart is always safe."
+        print("⚠️ Caption was empty, using fallback:", line)
+
     print(f"   Line: {line}")
 
     print("🖼️ Creating 1080x1920 canvas with text overlay...")
