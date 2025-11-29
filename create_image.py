@@ -54,7 +54,6 @@ def pick_unique_image() -> Path:
 
     used_images = load_json(USED_IMAGES_PATH, [])
 
-    # reset if everything used
     available = [p for p in all_images if p.name not in used_images]
     if not available:
         used_images = []
@@ -79,12 +78,10 @@ def configure_gemini():
 
 def clean_line(text: str) -> str:
     text = text.strip().replace("\n", " ")
-    # remove quotes
     if text.startswith(("\"", "“", "‘")) and len(text) > 2:
         text = text[1:]
     if text.endswith(("\"", "”", "’")) and len(text) > 2:
         text = text[:-1]
-    # collapse spaces
     while "  " in text:
         text = text.replace("  ", " ")
     return text.strip()
@@ -102,12 +99,9 @@ You write short, deep, positive one-line reflections about Lord Krishna.
 Rules:
 - 1 single sentence only.
 - Max 14 words.
-- Must mention "Krishna" or "He" clearly referring to Krishna.
+- Must mention "Krishna" or clearly refer to Him as "He".
 - Tone: comforting, devotional, grateful, hopeful.
-- No hashtags, no emojis, no quotes characters.
-Examples of style (do NOT repeat exactly):
-- He knows your tears, trust Krishna with what you cannot explain.
-- In Krishna’s care, even your worries are secretly turning into blessings.
+- No hashtags, no emojis, no quote marks.
 Return ONLY the sentence.
 """.strip()
 
@@ -117,9 +111,9 @@ Return ONLY the sentence.
         print(f"🕉️ Gemini attempt {attempt}...")
         try:
             resp = model.generate_content(prompt)
+
             text = getattr(resp, "text", None)
             if not text and resp.candidates:
-                # robust fallback
                 parts = resp.candidates[0].content.parts
                 text = "".join(getattr(p, "text", "") for p in parts)
 
@@ -146,9 +140,7 @@ Return ONLY the sentence.
                 print("   ⚠️ Duplicate line, skip.")
                 continue
 
-            # accept
             used_lines.append(line)
-            # keep last 500 only
             used_lines = used_lines[-500:]
             save_json(USED_LINES_PATH, used_lines)
 
@@ -158,7 +150,6 @@ Return ONLY the sentence.
         except Exception as e:
             print(f"   ⚠️ Error from Gemini: {e}")
 
-    # Fallback line if Gemini keeps failing
     fallback = "He knows your heart; trust Krishna with what you cannot see."
     print(f"⚠️ Using fallback line: {fallback}")
     return fallback
@@ -167,11 +158,6 @@ Return ONLY the sentence.
 # ---------- Text placement logic ----------
 
 def smart_text_y_on_image(canvas: Image.Image, box):
-    """
-    Decide Y position for text INSIDE the painted image region only.
-
-    box = (x0, y0, x1, y1) of pasted Krishna art on the 1080x1920 canvas.
-    """
     x0, y0, x1, y1 = box
     img_crop = canvas.crop(box).convert("L")
     arr = np.array(img_crop)
@@ -188,25 +174,25 @@ def smart_text_y_on_image(canvas: Image.Image, box):
     darkest = min(scores, key=scores.get)
 
     if darkest == "top":
-        local_y = int(h * 0.18)
+        local_y = int(h * 0.20)
     elif darkest == "middle":
         local_y = int(h * 0.50)
     else:
-        local_y = int(h * 0.82)
+        local_y = int(h * 0.80)
 
-    # convert local (inside crop) to global canvas Y
     return y0 + local_y
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    # Try custom font if you add one later
+    # GitHub runner has DejaVuSans installed
     candidates = [
-        ROOT / "fonts" / "PlayfairDisplay-Medium.ttf",
-        ROOT / "fonts" / "PlayfairDisplay-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for p in candidates:
-        if p.exists():
-            return ImageFont.truetype(str(p), size=size)
+        if os.path.exists(p):
+            return ImageFont.truetype(p, size=size)
+
     try:
         return ImageFont.truetype("arial.ttf", size=size)
     except Exception:
@@ -214,9 +200,6 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 def wrap_line(text: str, draw: ImageDraw.ImageDraw, font, max_width: int):
-    """
-    Wraps text into 1–2 lines, centered, without exceeding max_width.
-    """
     words = text.split()
     if not words:
         return [""]
@@ -225,15 +208,14 @@ def wrap_line(text: str, draw: ImageDraw.ImageDraw, font, max_width: int):
     current = words[0]
     for w in words[1:]:
         test = current + " " + w
-        w_box = draw.textbbox((0, 0), test, font=font)
-        if w_box[2] <= max_width:
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] <= max_width:
             current = test
         else:
             lines.append(current)
             current = w
     lines.append(current)
 
-    # If more than 2 lines, merge into 2
     if len(lines) > 2:
         first = " ".join(lines[:-1])
         second = lines[-1]
@@ -245,10 +227,9 @@ def wrap_line(text: str, draw: ImageDraw.ImageDraw, font, max_width: int):
 def draw_elegant_text(canvas: Image.Image, text: str, image_box):
     draw = ImageDraw.Draw(canvas)
 
-    # Slightly smaller for very long lines
-    base_size = 44
+    base_size = 60
     if len(text) > 70:
-        base_size = 38
+        base_size = 52
     font = load_font(base_size)
 
     x0, y0, x1, y1 = image_box
@@ -264,7 +245,7 @@ def draw_elegant_text(canvas: Image.Image, text: str, image_box):
         line_widths.append(bbox[2])
         line_heights.append(bbox[3] - bbox[1])
 
-    total_h = sum(line_heights) + (len(lines) - 1) * 8  # small line spacing
+    total_h = sum(line_heights) + (len(lines) - 1) * 10
     center_y = smart_text_y_on_image(canvas, image_box)
     start_y = center_y - total_h // 2
 
@@ -272,12 +253,10 @@ def draw_elegant_text(canvas: Image.Image, text: str, image_box):
         w = line_widths[i]
         h = line_heights[i]
         x = (TARGET_W - w) // 2
-        y = start_y + i * (h + 8)
+        y = start_y + i * (h + 10)
 
-        # Soft shadow
-        draw.text((x + 2, y + 2), line, font=font, fill=(0, 0, 0, 180))
-        # Main text
-        draw.text((x, y), line, font=font, fill=(255, 255, 255))
+        draw.text((x + 3, y + 3), line, font=font, fill=(0, 0, 0, 220))   # shadow
+        draw.text((x, y), line, font=font, fill=(255, 255, 255))         # main
 
     return canvas
 
@@ -287,10 +266,8 @@ def draw_elegant_text(canvas: Image.Image, text: str, image_box):
 def create_frame(image_path: Path, line: str) -> Path:
     img = Image.open(image_path).convert("RGB")
 
-    # Create 1080x1920 black canvas
     canvas = Image.new("RGB", (TARGET_W, TARGET_H), (0, 0, 0))
 
-    # Resize image to fit while preserving aspect ratio
     img_ratio = img.width / img.height
     target_ratio = TARGET_W / TARGET_H
 
@@ -306,7 +283,6 @@ def create_frame(image_path: Path, line: str) -> Path:
     offset_y = (TARGET_H - new_h) // 2
 
     canvas.paste(img_resized, (offset_x, offset_y))
-
     image_box = (offset_x, offset_y, offset_x + new_w, offset_y + new_h)
 
     print(f"📝 Overlay text: {line}")
@@ -318,8 +294,6 @@ def create_frame(image_path: Path, line: str) -> Path:
 
     return out_path
 
-
-# ---------- Main ----------
 
 def main():
     print("🎬 Krishna frame generator starting...")
