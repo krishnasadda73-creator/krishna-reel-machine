@@ -1,364 +1,251 @@
-# create_image.py
-#
-# 1) Pick a random Krishna image from images/
-# 2) Ask Gemini to write a deep Hindi Krishna line (with cute emojis)
-# 3) Make sure the line is:
-#       - Hindi-only
-#       - Short, deep, positive
-#       - Focused on Krishna
-#       - NOT a duplicate of previous lines
-# 4) Draw the text on a 1080x1920 canvas with the image
-# 5) Save PNG into output/ for the video step
-
 import os
-import json
 import random
-from typing import List, Set
+import json
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-
 import google.generativeai as genai
 
-# ---------------- CONFIG ---------------- #
+# ------------- PATHS & CONSTANTS -------------
 
-MODEL_NAME = "models/gemini-flash-latest"
-IMAGES_DIR = "images"
-OUTPUT_DIR = "output"
-STATE_DIR = "state"
-STATE_FILE = os.path.join(STATE_DIR, "used_lines.json")
+BASE_DIR = Path(__file__).parent
+IMAGES_DIR = BASE_DIR / "images"
+OUTPUT_DIR = BASE_DIR / "output"
+STATE_DIR = BASE_DIR / "state"
 
-# We'll save the same frame under a few common names so create_video.py
-# can always find at least one PNG.
-OUTPUT_FRAME_NAMES = [
-    "krishna_frame.png",
-    "frame.png",
-    "reel_frame.png",
-]
+USED_LINES_FILE = STATE_DIR / "used_lines.json"
 
-# Cute emojis we allow / sometimes append
-EMOJIS = ["❤️", "🌸", "🦚", "🕊️", "✨", "💙", "🌿", "🌙"]
+CANVAS_WIDTH = 1080
+CANVAS_HEIGHT = 1920
 
-# These are example styles (user’s vibe) – we also treat them as "already used"
-STYLE_EXAMPLES = [
-    "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं। ❤️",
-    "जिसने कृष्ण को पाया, उसने सब कुछ पा लिया। 🌸",
-    "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे। 💙",
-    "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं। ✨",
-    "कृष्ण का नाम ही हर समस्या का समाधान है। 🦚",
-    "जो हुआ अच्छा हुआ, जो हो रहा है कृष्ण की इच्छा से हो रहा है। 🌿",
-    "कृष्ण की शरण में गए तो फिर किसी सहारे की ज़रूरत नहीं। 🕊️",
-    "हर टूटे दिल की दवा सिर्फ एक — श्रीकृष्ण। ❤️",
-    "कृष्ण ने संभाल लिया, अब मुझे किसी बात का डर नहीं। 🌙",
-    "कृष्ण चुप रहते हैं, लेकिन कभी गलत नहीं करते। 🔱",
-]
+# Use a good Gemini model name that we know works
+GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
-# ------------- GEMINI SETUP ------------- #
+# ------------- HELPERS FOR DIRECTORIES & STATE -------------
 
-def setup_gemini() -> genai.GenerativeModel:
+def ensure_dirs():
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    STATE_DIR.mkdir(exist_ok=True)
+
+def load_used_lines():
+    if USED_LINES_FILE.exists():
+        try:
+            with open(USED_LINES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return set(data)
+        except Exception:
+            pass
+    return set()
+
+def save_used_lines(lines_set):
+    try:
+        with open(USED_LINES_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(lines_set)), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Could not save used lines: {e}")
+
+# ------------- GEMINI SETUP & PROMPT -------------
+
+def setup_gemini():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not found in environment.")
-
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return genai.GenerativeModel(GEMINI_MODEL_NAME)
 
-# ------------- STATE HELPERS ------------- #
+GEMINI_PROMPT = """
+You are writing very short, deep one-line quotes about Lord Krishna.
 
-def load_used_lines() -> Set[str]:
-    os.makedirs(STATE_DIR, exist_ok=True)
-    if not os.path.exists(STATE_FILE):
-        # seed with examples so we always get NEW lines
-        return set(STYLE_EXAMPLES)
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # merge with examples
-        return set(data) | set(STYLE_EXAMPLES)
-    except Exception:
-        return set(STYLE_EXAMPLES)
+Rules:
+- Only 1 sentence.
+- 8 to 14 words.
+- Focus on faith, surrender, trust, gratitude, protection, peace.
+- Tone: emotional, peaceful, devotional, comforting.
+- No hashtags, no emojis, no quotes (" ") around the line.
+- No references to social media, followers, or "today".
+- English only.
 
-def save_used_lines(lines: Set[str]) -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(lines)), f, ensure_ascii=False, indent=2)
-    except Exception:
-        # If saving fails we still continue, just no long-term dedupe.
-        pass
-
-# ------------- TEXT CLEANING ------------- #
-
-def is_hindi(text: str) -> bool:
-    # Check if there is at least one Devanagari character
-    return any("\u0900" <= ch <= "\u097F" for ch in text)
-
-def clean_line(raw: str) -> str:
-    if not raw:
-        return ""
-    # Take only first line
-    text = raw.strip().split("\n")[0]
-    # Remove extra quotes, bullets etc.
-    for ch in ['"', "“", "”", "'", "‘", "’", "-", "•"]:
-        if text.startswith(ch):
-            text = text[1:].strip()
-        if text.endswith(ch):
-            text = text[:-1].strip()
-    # Collapse spaces
-    text = " ".join(text.split())
-    return text
-
-def ensure_emoji(text: str) -> str:
-    # If already has one of our emojis, keep it
-    if any(e in text for e in EMOJIS):
-        return text
-    # Otherwise, append 1–2 random emojis
-    extra = "".join(random.sample(EMOJIS, k=2))
-    # If sentence already ends with punctuation, just add emojis
-    if text.endswith(("।", ".", "!", "…")):
-        return f"{text} {extra}"
-    else:
-        return f"{text}। {extra}"
-
-# ------------- GEMINI GENERATION ------------- #
-
-def generate_deep_krishna_line(model: genai.GenerativeModel,
-                               used: Set[str],
-                               max_attempts: int = 8) -> str:
-    """
-    Ask Gemini for a short deep Hindi Krishna line with emojis,
-    avoiding duplicates.
-    """
-
-    prompt = f"""
-आप एक Instagram Reels कंटेंट राइटर हैं।
-आपका काम सिर्फ एक लाइन लिखना है — छोटी, गहरी, पॉज़िटिव, और पूरी तरह भगवान श्रीकृष्ण पर केंद्रित।
-
-सख्त नियम:
-- भाषा: केवल हिंदी (देवनागरी में लिखो, अंग्रेज़ी शब्द नहीं)
-- लंबाई: 8 से 16 शब्द
-- टोन: शांत, भरोसा, surrender, care, सुरक्षा, प्रेम
-- स्टाइल: simple, direct, relatable (लोग तुरंत connect करें)
-- कंटेंट: भगवान श्रीकृष्ण को center में रखो (नाम ज़रूर आए — कृष्ण / श्रीकृष्ण / कान्हा / गोविंद आदि)
-- आउटपुट: सिर्फ एक लाइन, कोई extra टेक्स्ट, कोई explanation नहीं
-- प्यारे इमोजी include कर सकते हो जैसे: {", ".join(EMOJIS)}
-- लाइन motivational या healing लगे, over dramatic नहीं
-
-स्टाइल के उदाहरण (इन जैसी vibe, पर एकदम नई लाइन):
-1. "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं। ❤️"
-2. "जिसने कृष्ण को पाया, उसने सब कुछ पा लिया। 🌸"
-3. "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे। 💙"
-4. "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं। ✨"
-5. "कृष्ण की शरण में गए तो फिर किसी सहारे की ज़रूरत नहीं। 🕊️"
-
-अब इन्हें ध्यान से पढ़कर, इन्हीं की तरह स्टाइल रखते हुए,
-एक नई, यूनिक, गहरी, छोटी हिंदी लाइन लिखो।
+Return only the line, nothing else.
 """
 
-    attempts = 0
-    seen_this_call: Set[str] = set()
-
-    while attempts < max_attempts:
-        attempts += 1
-        print(f"👉 Gemini attempt {attempts}...")
-
-        try:
-            response = model.generate_content(prompt)
-            raw_text = getattr(response, "text", None)
-        except Exception as e:
-            print(f"   Gemini error: {e}")
-            continue
-
-        if not raw_text:
-            print("   Empty response, retrying...")
-            continue
-
-        line = clean_line(raw_text)
-        print(f"   Candidate: {line}")
-
-        # Basic quality filters
-        if not line:
-            print("   Rejected: empty after cleaning.")
-            continue
-
-        if not is_hindi(line):
-            print("   Rejected: not detected as Hindi.")
-            continue
-
-        words = line.split()
-        if not (8 <= len(words) <= 16):
-            print(f"   Rejected: {len(words)} words (needs 8–16).")
-            continue
-
-        # Add emojis if needed
-        line = ensure_emoji(line)
-
-        # Dedupe across previous runs + this run
-        if line in used or line in seen_this_call:
-            print("   Rejected: duplicate line.")
-            continue
-
-        # Accept
-        seen_this_call.add(line)
-        used.add(line)
-        save_used_lines(used)
-        print(f"   ✅ Final chosen line: {line}")
-        return line
-
-    # Fallback: if Gemini keeps failing, pick a random style example
-    print("⚠️ Using fallback style example (Gemini failed too many times).")
-    fallback = random.choice(STYLE_EXAMPLES)
-    # Make sure fallback has emoji
-    fallback = ensure_emoji(clean_line(fallback))
-    used.add(fallback)
-    save_used_lines(used)
-    return fallback
-
-# ------------- IMAGE / TEXT RENDERING ------------- #
-
-def load_krishna_image() -> Image.Image:
-    # Pick a random image from IMAGES_DIR
-    files = [
-        f for f in os.listdir(IMAGES_DIR)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-    if not files:
-        raise RuntimeError(f"No images found in {IMAGES_DIR}/")
-
-    choice = random.choice(files)
-    path = os.path.join(IMAGES_DIR, choice)
-    print(f"🎨 Picking Krishna image: {path}")
-    base = Image.open(path).convert("RGB")
-    return base
-
-def load_devanagari_font(size: int) -> ImageFont.FreeTypeFont:
+def generate_unique_krishna_line(max_attempts=8):
     """
-    Try to load a Devanagari-supporting font on Ubuntu runner.
-    Fallback to default PIL font if nothing found.
+    Call Gemini until we get a non-empty, not-duplicate line.
     """
-    candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size=size)
-            except Exception:
-                continue
-    print("⚠️ Devanagari font not found, using default font.")
-    return ImageFont.load_default()
-
-def create_canvas_with_image(base_img: Image.Image,
-                             size=(1080, 1920)) -> Image.Image:
-    canvas = Image.new("RGB", size, color=(0, 0, 0))
-    bw, bh = base_img.size
-    cw, ch = size
-
-    # scale image to fit height while keeping aspect
-    scale = min(cw / bw, ch / bh)
-    new_w = int(bw * scale)
-    new_h = int(bh * scale)
-    resized = base_img.resize((new_w, new_h), Image.LANCZOS)
-
-    x = (cw - new_w) // 2
-    y = (ch - new_h) // 2
-    canvas.paste(resized, (x, y))
-    return canvas
-
-def draw_centered_text(canvas: Image.Image, text: str) -> Image.Image:
-    draw = ImageDraw.Draw(canvas)
-    cw, ch = canvas.size
-
-    font = load_devanagari_font(size=52)
-
-    # wrap text in multiple lines
-    max_width = int(cw * 0.8)
-
-    def text_size(t: str):
-        return draw.textbbox((0, 0), t, font=font)
-
-    # simple word wrap
-    words = text.split()
-    lines: List[str] = []
-    current: List[str] = []
-    for w in words:
-        test = " ".join(current + [w])
-        bbox = text_size(test)
-        width = bbox[2] - bbox[0]
-        if width <= max_width:
-            current.append(w)
-        else:
-            if current:
-                lines.append(" ".join(current))
-            current = [w]
-    if current:
-        lines.append(" ".join(current))
-
-    line_height = (text_size("हिन्दी")[3] - text_size("हिन्दी")[1]) + 10
-    total_height = line_height * len(lines)
-
-    # place text around 70% height (little above bottom)
-    y_start = int(ch * 0.70 - total_height / 2)
-
-    # semi-transparent box behind text for readability
-    padding_x = 40
-    padding_y = 20
-    min_x = cw
-    max_x = 0
-    for line in lines:
-        bbox = text_size(line)
-        w = bbox[2] - bbox[0]
-        min_x = min(min_x, (cw - w) // 2)
-        max_x = max(max_x, (cw + w) // 2)
-    box_top = y_start - padding_y
-    box_bottom = y_start + total_height + padding_y
-    draw.rectangle(
-        [(min_x - padding_x, box_top),
-         (max_x + padding_x, box_bottom)],
-        fill=(0, 0, 0, 180)
-    )
-
-    # draw each line
-    y = y_start
-    for line in lines:
-        bbox = text_size(line)
-        w = bbox[2] - bbox[0]
-        x = (cw - w) // 2
-        draw.text((x, y), line, font=font, fill=(255, 255, 255))
-        y += line_height
-
-    return canvas
-
-# ------------- MAIN ENTRY ------------- #
-
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    print("🕉️ Loading Gemini model...")
+    used = load_used_lines()
     model = setup_gemini()
 
-    print("📜 Loading used lines state...")
-    used_lines = load_used_lines()
+    for attempt in range(1, max_attempts + 1):
+        print(f"👉 Gemini attempt {attempt}...")
+        try:
+            resp = model.generate_content(GEMINI_PROMPT)
+            # Safe way to get plain text from response:
+            text = resp.candidates[0].content.parts[0].text.strip()
+        except Exception as e:
+            print(f"⚠️ Gemini error on attempt {attempt}: {e}")
+            continue
 
-    print("🕉️ Generating deep Krishna Hindi line...")
-    line = generate_deep_krishna_line(model, used_lines)
-    print(f"✅ Final reel line: {line}")
+        # Basic cleaning
+        line = text.replace("\n", " ").strip()
+        # Remove any surrounding quotes
+        if line.startswith(("'", '"')) and line.endswith(("'", '"')) and len(line) > 2:
+            line = line[1:-1].strip()
 
-    print("🎨 Loading Krishna image...")
-    base_img = load_krishna_image()
+        print(f"   Candidate: {line!r}")
 
-    print("🖼️ Creating canvas and drawing text...")
-    canvas = create_canvas_with_image(base_img)
-    canvas = draw_centered_text(canvas, line)
+        # Skip if empty or duplicate
+        if not line:
+            continue
+        if line in used:
+            print("   ↪️ Already used, trying again.")
+            continue
 
-    # Save under several common names so video step can find it
-    for name in OUTPUT_FRAME_NAMES:
-        out_path = os.path.join(OUTPUT_DIR, name)
-        canvas.save(out_path, format="PNG")
-        print(f"💾 Saved frame: {out_path}")
+        # New good line
+        used.add(line)
+        save_used_lines(used)
+        print(f"✅ Accepted line: {line!r}")
+        return line
 
-    print("✨ Image + text frame ready.")
+    print("❌ Could not get a fresh line from Gemini.")
+    return None
+
+# ------------- IMAGE / TEXT DRAWING -------------
+
+def pick_random_image():
+    if not IMAGES_DIR.exists():
+        raise RuntimeError(f"Images folder not found: {IMAGES_DIR}")
+    candidates = [p for p in IMAGES_DIR.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]]
+    if not candidates:
+        raise RuntimeError(f"No images found in {IMAGES_DIR}")
+    chosen = random.choice(candidates)
+    print(f"🎨 Using image: {chosen.name}")
+    return chosen
+
+def load_font(size):
+    # Try DejaVuSans (present in GitHub runners)
+    possible_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    # Fallback to default font
+    print("⚠️ Could not find DejaVu font, using default.")
+    return ImageFont.load_default()
+
+def draw_text_bar(canvas, text):
+    """
+    Draws a semi-transparent dark bar at bottom with centered white text.
+    """
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    W, H = canvas.size
+
+    # Bar geometry
+    bar_height = int(H * 0.22)
+    bar_top = H - bar_height
+    bar_bottom = H
+
+    # Draw translucent bar
+    bar_color = (0, 0, 0, 180)  # almost black, semi-transparent
+    draw.rectangle([(0, bar_top), (W, bar_bottom)], fill=bar_color)
+
+    # Text wrapping
+    font = load_font(52)
+    max_width = int(W * 0.85)
+
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test_line = (current + " " + word).strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        line_width = bbox[2] - bbox[0]
+        if line_width <= max_width:
+            current = test_line
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    # Compute total text height
+    line_heights = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_heights.append(bbox[3] - bbox[1])
+    total_text_height = sum(line_heights) + (len(lines) - 1) * 10
+
+    start_y = bar_top + (bar_height - total_text_height) // 2
+
+    # Draw each line centered
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        line_h = bbox[3] - bbox[1]
+        x = (W - line_w) // 2
+        y = start_y + sum(line_heights[:i]) + i * 10
+
+        # Stroke (outline) first
+        draw.text((x, y), line, font=font, fill="white",
+                  stroke_width=3, stroke_fill="black")
+
+def create_frame_with_text():
+    ensure_dirs()
+
+    # 1) Pick base image
+    img_path = pick_random_image()
+    base_img = Image.open(img_path).convert("RGB")
+
+    # 2) Generate deep Krishna line
+    print("🕉️ Generating deep Krishna line from Gemini...")
+    line = generate_unique_krishna_line()
+    if not line:
+        raise RuntimeError("No line generated from Gemini – cannot continue.")
+
+    # Save line for debug
+    debug_txt = OUTPUT_DIR / "last_line.txt"
+    with open(debug_txt, "w", encoding="utf-8") as f:
+        f.write(line)
+    print(f"📝 Saved text line to {debug_txt}")
+
+    # 3) Create 1080x1920 canvas and paste image
+    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), color=(0, 0, 0))
+
+    # Resize base image to fit (keeping aspect)
+    img_aspect = base_img.width / base_img.height
+    canvas_aspect = CANVAS_WIDTH / CANVAS_HEIGHT
+
+    if img_aspect > canvas_aspect:
+        # Image is wider → fit width
+        new_width = CANVAS_WIDTH
+        new_height = int(new_width / img_aspect)
+    else:
+        # Image is taller → fit height
+        new_height = CANVAS_HEIGHT
+        new_width = int(new_height * img_aspect)
+
+    resized = base_img.resize((new_width, new_height), Image.LANCZOS)
+    x = (CANVAS_WIDTH - new_width) // 2
+    y = (CANVAS_HEIGHT - new_height) // 2
+    canvas.paste(resized, (x, y))
+
+    # 4) Draw text bar + text
+    draw_text_bar(canvas, line)
+
+    # 5) Save result
+    out_path = OUTPUT_DIR / "krishna_frame.png"
+    canvas.save(out_path, format="PNG")
+    print(f"✅ Saved frame with text to: {out_path}")
+
+    return out_path
+
+def main():
+    create_frame_with_text()
 
 if __name__ == "__main__":
     main()
