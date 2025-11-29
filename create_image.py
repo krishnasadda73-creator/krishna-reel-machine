@@ -1,309 +1,251 @@
 import os
-import json
 import random
+import json
 from pathlib import Path
 
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from google import generativeai as gen
+import google.generativeai as genai
 
-# ---------- Paths & constants ----------
+# ------------- PATHS & CONSTANTS -------------
 
-ROOT = Path(__file__).parent
-IMAGES_DIR = ROOT / "images"
-OUTPUT_DIR = ROOT / "output"
-STATE_DIR = ROOT / "state"
+BASE_DIR = Path(__file__).parent
+IMAGES_DIR = BASE_DIR / "images"
+OUTPUT_DIR = BASE_DIR / "output"
+STATE_DIR = BASE_DIR / "state"
 
-OUTPUT_DIR.mkdir(exist_ok=True)
-STATE_DIR.mkdir(exist_ok=True)
+USED_LINES_FILE = STATE_DIR / "used_lines.json"
 
-USED_LINES_PATH = STATE_DIR / "used_lines.json"
-USED_IMAGES_PATH = STATE_DIR / "used_images.json"
+CANVAS_WIDTH = 1080
+CANVAS_HEIGHT = 1920
 
+# Use a good Gemini model name that we know works
 GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
-TARGET_W = 1080
-TARGET_H = 1920
+# ------------- HELPERS FOR DIRECTORIES & STATE -------------
 
+def ensure_dirs():
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    STATE_DIR.mkdir(exist_ok=True)
 
-# ---------- Small helpers ----------
-
-def load_json(path: Path, default):
-    if path.exists():
+def load_used_lines():
+    if USED_LINES_FILE.exists():
         try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(USED_LINES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return set(data)
         except Exception:
-            return default
-    return default
+            pass
+    return set()
 
+def save_used_lines(lines_set):
+    try:
+        with open(USED_LINES_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(lines_set)), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Could not save used lines: {e}")
 
-def save_json(path: Path, data):
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# ------------- GEMINI SETUP & PROMPT -------------
 
-
-# ---------- Unique image selection ----------
-
-def pick_unique_image() -> Path:
-    all_images = sorted(
-        [p for p in IMAGES_DIR.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
-    )
-    if not all_images:
-        raise RuntimeError(f"No images found in {IMAGES_DIR}")
-
-    used_images = load_json(USED_IMAGES_PATH, [])
-
-    available = [p for p in all_images if p.name not in used_images]
-    if not available:
-        used_images = []
-        available = all_images
-
-    chosen = random.choice(available)
-    used_images.append(chosen.name)
-    save_json(USED_IMAGES_PATH, used_images)
-
-    print(f"🖼️ Using Krishna image: {chosen}")
-    return chosen
-
-
-# ---------- Gemini caption generation ----------
-
-def configure_gemini():
-    api_key = os.environ.get("GEMINI_API_KEY")
+def setup_gemini():
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in environment.")
-    gen.configure(api_key=api_key)
+        raise RuntimeError("GEMINI_API_KEY not found in environment.")
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(GEMINI_MODEL_NAME)
 
-
-def clean_line(text: str) -> str:
-    text = text.strip().replace("\n", " ")
-    if text.startswith(("\"", "“", "‘")) and len(text) > 2:
-        text = text[1:]
-    if text.endswith(("\"", "”", "’")) and len(text) > 2:
-        text = text[:-1]
-    while "  " in text:
-        text = text.replace("  ", " ")
-    return text.strip()
-
-
-def generate_unique_krishna_line(max_attempts: int = 8) -> str:
-    configure_gemini()
-
-    used_lines = load_json(USED_LINES_PATH, [])
-    used_lower = {s.lower() for s in used_lines}
-
-    prompt = """
-You write short, deep, positive one-line reflections about Lord Krishna.
+GEMINI_PROMPT = """
+You are writing very short, deep one-line quotes about Lord Krishna.
 
 Rules:
-- 1 single sentence only.
-- Max 14 words.
-- Must mention "Krishna" or clearly refer to Him as "He".
-- Tone: comforting, devotional, grateful, hopeful.
-- No hashtags, no emojis, no quote marks.
-Return ONLY the sentence.
-""".strip()
+- Only 1 sentence.
+- 8 to 14 words.
+- Focus on faith, surrender, trust, gratitude, protection, peace.
+- Tone: emotional, peaceful, devotional, comforting.
+- No hashtags, no emojis, no quotes (" ") around the line.
+- No references to social media, followers, or "today".
+- English only.
 
-    model = gen.GenerativeModel(GEMINI_MODEL_NAME)
+Return only the line, nothing else.
+"""
+
+def generate_unique_krishna_line(max_attempts=8):
+    """
+    Call Gemini until we get a non-empty, not-duplicate line.
+    """
+    used = load_used_lines()
+    model = setup_gemini()
 
     for attempt in range(1, max_attempts + 1):
-        print(f"🕉️ Gemini attempt {attempt}...")
+        print(f"👉 Gemini attempt {attempt}...")
         try:
-            resp = model.generate_content(prompt)
-
-            text = getattr(resp, "text", None)
-            if not text and resp.candidates:
-                parts = resp.candidates[0].content.parts
-                text = "".join(getattr(p, "text", "") for p in parts)
-
-            if not text:
-                print("   ⚠️ Empty response, retrying...")
-                continue
-
-            line = clean_line(text)
-            print(f"   Candidate: {line}")
-
-            if not line:
-                print("   ⚠️ Line empty after cleaning, skip.")
-                continue
-
-            if len(line.split()) > 14:
-                print("   ⚠️ Too long, skip.")
-                continue
-
-            if "krishna" not in line.lower() and "he " not in line.lower():
-                print("   ⚠️ Does not clearly refer to Krishna, skip.")
-                continue
-
-            if line.lower() in used_lower:
-                print("   ⚠️ Duplicate line, skip.")
-                continue
-
-            used_lines.append(line)
-            used_lines = used_lines[-500:]
-            save_json(USED_LINES_PATH, used_lines)
-
-            print(f"✅ Final line: {line}")
-            return line
-
+            resp = model.generate_content(GEMINI_PROMPT)
+            # Safe way to get plain text from response:
+            text = resp.candidates[0].content.parts[0].text.strip()
         except Exception as e:
-            print(f"   ⚠️ Error from Gemini: {e}")
+            print(f"⚠️ Gemini error on attempt {attempt}: {e}")
+            continue
 
-    fallback = "He knows your heart; trust Krishna with what you cannot see."
-    print(f"⚠️ Using fallback line: {fallback}")
-    return fallback
+        # Basic cleaning
+        line = text.replace("\n", " ").strip()
+        # Remove any surrounding quotes
+        if line.startswith(("'", '"')) and line.endswith(("'", '"')) and len(line) > 2:
+            line = line[1:-1].strip()
 
+        print(f"   Candidate: {line!r}")
 
-# ---------- Text placement logic ----------
+        # Skip if empty or duplicate
+        if not line:
+            continue
+        if line in used:
+            print("   ↪️ Already used, trying again.")
+            continue
 
-def smart_text_y_on_image(canvas: Image.Image, box):
-    x0, y0, x1, y1 = box
-    img_crop = canvas.crop(box).convert("L")
-    arr = np.array(img_crop)
+        # New good line
+        used.add(line)
+        save_used_lines(used)
+        print(f"✅ Accepted line: {line!r}")
+        return line
 
-    h, w = arr.shape
+    print("❌ Could not get a fresh line from Gemini.")
+    return None
 
-    zones = {
-        "top": arr[0:int(h * 0.25), :],
-        "middle": arr[int(h * 0.38):int(h * 0.63), :],
-        "bottom": arr[int(h * 0.75):h, :],
-    }
+# ------------- IMAGE / TEXT DRAWING -------------
 
-    scores = {name: np.mean(zone) for name, zone in zones.items()}
-    darkest = min(scores, key=scores.get)
+def pick_random_image():
+    if not IMAGES_DIR.exists():
+        raise RuntimeError(f"Images folder not found: {IMAGES_DIR}")
+    candidates = [p for p in IMAGES_DIR.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]]
+    if not candidates:
+        raise RuntimeError(f"No images found in {IMAGES_DIR}")
+    chosen = random.choice(candidates)
+    print(f"🎨 Using image: {chosen.name}")
+    return chosen
 
-    if darkest == "top":
-        local_y = int(h * 0.20)
-    elif darkest == "middle":
-        local_y = int(h * 0.50)
-    else:
-        local_y = int(h * 0.80)
-
-    return y0 + local_y
-
-
-def load_font(size: int) -> ImageFont.FreeTypeFont:
-    # GitHub runner has DejaVuSans installed
-    candidates = [
+def load_font(size):
+    # Try DejaVuSans (present in GitHub runners)
+    possible_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
-    for p in candidates:
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size=size)
+    for path in possible_paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    # Fallback to default font
+    print("⚠️ Could not find DejaVu font, using default.")
+    return ImageFont.load_default()
 
-    try:
-        return ImageFont.truetype("arial.ttf", size=size)
-    except Exception:
-        return ImageFont.load_default()
+def draw_text_bar(canvas, text):
+    """
+    Draws a semi-transparent dark bar at bottom with centered white text.
+    """
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    W, H = canvas.size
 
+    # Bar geometry
+    bar_height = int(H * 0.22)
+    bar_top = H - bar_height
+    bar_bottom = H
 
-def wrap_line(text: str, draw: ImageDraw.ImageDraw, font, max_width: int):
+    # Draw translucent bar
+    bar_color = (0, 0, 0, 180)  # almost black, semi-transparent
+    draw.rectangle([(0, bar_top), (W, bar_bottom)], fill=bar_color)
+
+    # Text wrapping
+    font = load_font(52)
+    max_width = int(W * 0.85)
+
     words = text.split()
-    if not words:
-        return [""]
-
     lines = []
-    current = words[0]
-    for w in words[1:]:
-        test = current + " " + w
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] <= max_width:
-            current = test
+    current = ""
+
+    for word in words:
+        test_line = (current + " " + word).strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        line_width = bbox[2] - bbox[0]
+        if line_width <= max_width:
+            current = test_line
         else:
-            lines.append(current)
-            current = w
-    lines.append(current)
+            if current:
+                lines.append(current)
+            current = word
 
-    if len(lines) > 2:
-        first = " ".join(lines[:-1])
-        second = lines[-1]
-        lines = [first, second]
+    if current:
+        lines.append(current)
 
-    return lines
-
-
-def draw_elegant_text(canvas: Image.Image, text: str, image_box):
-    draw = ImageDraw.Draw(canvas)
-
-    base_size = 60
-    if len(text) > 70:
-        base_size = 52
-    font = load_font(base_size)
-
-    x0, y0, x1, y1 = image_box
-    inner_margin_x = int((x1 - x0) * 0.06)
-    inner_width = (x1 - x0) - 2 * inner_margin_x
-
-    lines = wrap_line(text, draw, font, inner_width)
-
+    # Compute total text height
     line_heights = []
-    line_widths = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
-        line_widths.append(bbox[2])
         line_heights.append(bbox[3] - bbox[1])
+    total_text_height = sum(line_heights) + (len(lines) - 1) * 10
 
-    total_h = sum(line_heights) + (len(lines) - 1) * 10
-    center_y = smart_text_y_on_image(canvas, image_box)
-    start_y = center_y - total_h // 2
+    start_y = bar_top + (bar_height - total_text_height) // 2
 
+    # Draw each line centered
     for i, line in enumerate(lines):
-        w = line_widths[i]
-        h = line_heights[i]
-        x = (TARGET_W - w) // 2
-        y = start_y + i * (h + 10)
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        line_h = bbox[3] - bbox[1]
+        x = (W - line_w) // 2
+        y = start_y + sum(line_heights[:i]) + i * 10
 
-        draw.text((x + 3, y + 3), line, font=font, fill=(0, 0, 0, 220))   # shadow
-        draw.text((x, y), line, font=font, fill=(255, 255, 255))         # main
+        # Stroke (outline) first
+        draw.text((x, y), line, font=font, fill="white",
+                  stroke_width=3, stroke_fill="black")
 
-    return canvas
+def create_frame_with_text():
+    ensure_dirs()
 
+    # 1) Pick base image
+    img_path = pick_random_image()
+    base_img = Image.open(img_path).convert("RGB")
 
-# ---------- Frame creation ----------
+    # 2) Generate deep Krishna line
+    print("🕉️ Generating deep Krishna line from Gemini...")
+    line = generate_unique_krishna_line()
+    if not line:
+        raise RuntimeError("No line generated from Gemini – cannot continue.")
 
-def create_frame(image_path: Path, line: str) -> Path:
-    img = Image.open(image_path).convert("RGB")
+    # Save line for debug
+    debug_txt = OUTPUT_DIR / "last_line.txt"
+    with open(debug_txt, "w", encoding="utf-8") as f:
+        f.write(line)
+    print(f"📝 Saved text line to {debug_txt}")
 
-    canvas = Image.new("RGB", (TARGET_W, TARGET_H), (0, 0, 0))
+    # 3) Create 1080x1920 canvas and paste image
+    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), color=(0, 0, 0))
 
-    img_ratio = img.width / img.height
-    target_ratio = TARGET_W / TARGET_H
+    # Resize base image to fit (keeping aspect)
+    img_aspect = base_img.width / base_img.height
+    canvas_aspect = CANVAS_WIDTH / CANVAS_HEIGHT
 
-    if img_ratio > target_ratio:
-        new_w = TARGET_W
-        new_h = int(TARGET_W / img_ratio)
+    if img_aspect > canvas_aspect:
+        # Image is wider → fit width
+        new_width = CANVAS_WIDTH
+        new_height = int(new_width / img_aspect)
     else:
-        new_h = TARGET_H
-        new_w = int(TARGET_H * img_ratio)
+        # Image is taller → fit height
+        new_height = CANVAS_HEIGHT
+        new_width = int(new_height * img_aspect)
 
-    img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-    offset_x = (TARGET_W - new_w) // 2
-    offset_y = (TARGET_H - new_h) // 2
+    resized = base_img.resize((new_width, new_height), Image.LANCZOS)
+    x = (CANVAS_WIDTH - new_width) // 2
+    y = (CANVAS_HEIGHT - new_height) // 2
+    canvas.paste(resized, (x, y))
 
-    canvas.paste(img_resized, (offset_x, offset_y))
-    image_box = (offset_x, offset_y, offset_x + new_w, offset_y + new_h)
+    # 4) Draw text bar + text
+    draw_text_bar(canvas, line)
 
-    print(f"📝 Overlay text: {line}")
-    canvas = draw_elegant_text(canvas, line, image_box)
-
+    # 5) Save result
     out_path = OUTPUT_DIR / "krishna_frame.png"
     canvas.save(out_path, format="PNG")
-    print(f"✅ Saved frame to: {out_path}")
+    print(f"✅ Saved frame with text to: {out_path}")
 
     return out_path
 
-
 def main():
-    print("🎬 Krishna frame generator starting...")
-
-    img_path = pick_unique_image()
-    line = generate_unique_krishna_line()
-    create_frame(img_path, line)
-
-    print("🎉 Frame generation complete.")
-
+    create_frame_with_text()
 
 if __name__ == "__main__":
     main()
