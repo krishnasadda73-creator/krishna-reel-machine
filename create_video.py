@@ -1,115 +1,53 @@
-import random
-import json
-import subprocess
-from pathlib import Path
+# create_video.py
+import os
 
-# We will look for PNGs in these folders, in this order.
-FRAME_DIRS = [Path("output"), Path("images")]
-
-BGM_DIR = Path("bgm")
-STATE_DIR = Path("state")
-USED_MUSIC_FILE = STATE_DIR / "used_music.json"
+from moviepy.editor import ImageClip, AudioFileClip
 
 
-# ---------- FIND LATEST IMAGE (AUTO, output/ OR images/) ----------
+IMAGE_PATH = "output/krishna_frame.png"
+BGM_PATH = "bgm/flute.mp3"      # rename if your file is different
+OUTPUT_DIR = "output"
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "krishna_reel.mp4")
 
-def find_latest_image():
-    candidates = []
-
-    for d in FRAME_DIRS:
-        if not d.exists():
-            continue
-        candidates.extend(list(d.glob("*.png")))
-
-    if not candidates:
-        raise SystemExit("❌ No PNG image found inside output/ or images/ folder")
-
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
-    print("🖼️ Using image:", latest)
-    return latest
+VIDEO_DURATION = 10  # seconds
+FPS = 30
 
 
-# ---------- MUSIC STATE (NO DUPLICATES) ----------
+def main():
+    if not os.path.exists(IMAGE_PATH):
+        raise RuntimeError(f"Image not found at {IMAGE_PATH}. "
+                           f"Run create_image.py first.")
 
-def load_used_music():
-    if not USED_MUSIC_FILE.exists():
-        return []
-    try:
-        with open(USED_MUSIC_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    if not os.path.exists(BGM_PATH):
+        raise RuntimeError(f"BGM not found at {BGM_PATH}.")
 
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def save_used_music(names):
-    STATE_DIR.mkdir(exist_ok=True)
-    with open(USED_MUSIC_FILE, "w", encoding="utf-8") as f:
-        json.dump(names, f, ensure_ascii=False, indent=2)
+    print("🎬 Creating reel video from frame + BGM...")
 
+    image_clip = ImageClip(IMAGE_PATH).set_duration(VIDEO_DURATION)
 
-def pick_bgm():
-    if not BGM_DIR.exists():
-        raise SystemExit("❌ bgm/ folder not found in repo")
+    audio_clip = AudioFileClip(BGM_PATH)
+    # Trim/loop audio to match duration
+    if audio_clip.duration > VIDEO_DURATION:
+        audio_clip = audio_clip.subclip(0, VIDEO_DURATION)
+    else:
+        audio_clip = audio_clip.audio_loop(duration=VIDEO_DURATION)
 
-    tracks = [
-        p for p in BGM_DIR.iterdir()
-        if p.suffix.lower() in {".mp3", ".wav", ".m4a"}
-    ]
+    video = image_clip.set_audio(audio_clip)
 
-    if not tracks:
-        raise SystemExit("❌ No BGM files found in bgm/ folder")
+    video.write_videofile(
+        OUTPUT_PATH,
+        codec="libx264",
+        audio_codec="aac",
+        fps=FPS,
+        threads=4,
+        verbose=False,
+        logger=None,
+    )
 
-    used = load_used_music()
-    unused = [p for p in tracks if p.name not in used]
-
-    # If all used, reset and start again (still random)
-    if not unused:
-        used = []
-        unused = tracks
-
-    chosen = random.choice(unused)
-    used.append(chosen.name)
-    save_used_music(used)
-
-    return chosen
-
-
-# ---------- CREATE VIDEO ----------
-
-def render_video(duration_seconds=15):
-    frame = find_latest_image()
-    bgm = pick_bgm()
-
-    OUTPUT_DIR = Path("output")
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    out_video = OUTPUT_DIR / "krishna_reel.mp4"
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-loop", "1",
-        "-i", str(frame),
-        "-i", str(bgm),
-        "-c:v", "libx264",
-        "-t", str(duration_seconds),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
-        "-vf",
-        "scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-        str(out_video),
-    ]
-
-    print("🎵 Using BGM:", bgm.name)
-    print("🎬 Creating video with ffmpeg...")
-
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        raise SystemExit("❌ ffmpeg failed when rendering video")
-
-    print("✅ Video created at:", out_video)
+    print(f"✅ Reel created: {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
-    render_video()
+    main()
