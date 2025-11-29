@@ -42,7 +42,7 @@ def get_gemini_client():
 def build_prompt():
     """
     Prompt for one deep, Krishna-focused line.
-    Style should match the screenshots you sent:
+    Style should match the screenshots:
       - short, calm, devotional
       - about trust, surrender, protection, guidance
     """
@@ -62,6 +62,8 @@ def build_prompt():
 
 def clean_text(text: str) -> str:
     """Make the line single-line, remove quotes etc."""
+    if not text:
+        return ""
     text = text.strip()
     # Remove newlines
     text = " ".join(text.split())
@@ -70,6 +72,34 @@ def clean_text(text: str) -> str:
         if text.startswith(ch) and text.endswith(ch):
             text = text[1:-1].strip()
     return text
+
+
+def extract_text_from_response(response) -> str:
+    """
+    Handle google-genai response formats.
+    Preferred: response.text
+    Fallback: first candidate/part text.
+    """
+    # New client has .text
+    if hasattr(response, "text") and isinstance(response.text, str):
+        return response.text
+
+    # Fallback – dig into candidates
+    try:
+        cands = getattr(response, "candidates", None) or []
+        for c in cands:
+            content = getattr(c, "content", None)
+            if not content:
+                continue
+            parts = getattr(content, "parts", None) or []
+            for p in parts:
+                t = getattr(p, "text", None)
+                if isinstance(t, str) and t.strip():
+                    return t
+    except Exception:
+        pass
+
+    return ""
 
 
 def generate_unique_krishna_line(max_retries: int = 6) -> str:
@@ -91,30 +121,10 @@ def generate_unique_krishna_line(max_retries: int = 6) -> str:
             ],
         )
 
-        line = clean_text(response.output_text)
+        raw_text = extract_text_from_response(response)
+        line = clean_text(raw_text)
 
         print(f"   Candidate: {line}")
 
         if not line:
-            continue
-
-        # Avoid exact duplicates
-        if line in used_lines:
-            print("   Skipping, already used before.")
-            continue
-
-        # Save and return
-        used_lines.append(line)
-        save_used_texts(used_lines)
-        print("\n✅ Final chosen line:")
-        print(line)
-        return line
-
-    raise RuntimeError("Could not get a new unique line from Gemini after retries.")
-
-
-if __name__ == "__main__":
-    line = generate_unique_krishna_line()
-    # This print is what later scripts will capture
-    print("\n===KRISHNA_LINE===")
-    print(line)
+            print("   Empty/invalid text, retrying...")
