@@ -1,0 +1,42 @@
+name: Krishna Reel (image + bgm video)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Load Gemini API key
+        run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Generate Krishna image frame (image + text)
+        run: python create_image.py
+
+      - name: Create reel video with BGM
+        run: python create_video.py
+
+      - name: Upload reel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: krishna_reel
+          path: output/krishna_reel.mp4
