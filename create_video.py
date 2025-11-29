@@ -3,12 +3,22 @@ import json
 import subprocess
 from pathlib import Path
 
-# Paths
-FRAME_FILE = Path("output/krishna_frame.png")
-BGM_DIR = Path("bgm")
 OUTPUT_DIR = Path("output")
+BGM_DIR = Path("bgm")
 STATE_DIR = Path("state")
 USED_MUSIC_FILE = STATE_DIR / "used_music.json"
+
+
+# ---------- FIND LATEST IMAGE (AUTO) ----------
+
+def find_latest_image():
+    images = list(OUTPUT_DIR.glob("*.png"))
+    if not images:
+        raise SystemExit("❌ No PNG image found inside output/ folder")
+
+    latest = max(images, key=lambda p: p.stat().st_mtime)
+    print("🖼️ Using image:", latest)
+    return latest
 
 
 # ---------- MUSIC STATE (NO DUPLICATES) ----------
@@ -34,13 +44,13 @@ def pick_bgm():
         p for p in BGM_DIR.iterdir()
         if p.suffix.lower() in {".mp3", ".wav", ".m4a"}
     ]
+
     if not tracks:
         raise SystemExit("❌ No BGM files found in bgm/ folder")
 
     used = load_used_music()
     unused = [p for p in tracks if p.name not in used]
 
-    # If all used, reset so they cycle again
     if not unused:
         used = []
         unused = tracks
@@ -48,25 +58,24 @@ def pick_bgm():
     chosen = random.choice(unused)
     used.append(chosen.name)
     save_used_music(used)
+
     return chosen
 
 
-# ---------- RENDER VIDEO WITH FFMPEG ----------
+# ---------- CREATE VIDEO ----------
 
-def render_video(duration_seconds: int = 15):
-    if not FRAME_FILE.exists():
-        raise SystemExit(f"❌ Frame image not found: {FRAME_FILE}")
-
+def render_video(duration_seconds=15):
     OUTPUT_DIR.mkdir(exist_ok=True)
-
+    frame = find_latest_image()
     bgm = pick_bgm()
+
     out_video = OUTPUT_DIR / "krishna_reel.mp4"
 
     cmd = [
         "ffmpeg",
         "-y",
         "-loop", "1",
-        "-i", str(FRAME_FILE),
+        "-i", str(frame),
         "-i", str(bgm),
         "-c:v", "libx264",
         "-t", str(duration_seconds),
@@ -76,18 +85,17 @@ def render_video(duration_seconds: int = 15):
         "-vf",
         "scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-        str(out_video),
+        str(out_video)
     ]
 
-    print("🎵 Using BGM:", bgm)
-    print("🎬 Running ffmpeg command:")
-    print(" ".join(cmd))
+    print("🎵 Using BGM:", bgm.name)
+    print("🎬 Creating video...")
 
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
-        raise SystemExit(f"❌ ffmpeg failed with code {result.returncode}")
+        raise SystemExit("❌ ffmpeg failed")
 
-    print("✅ Video saved at:", out_video)
+    print("✅ Video created:", out_video)
 
 
 if __name__ == "__main__":
