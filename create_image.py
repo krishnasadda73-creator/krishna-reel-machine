@@ -1,166 +1,244 @@
 import os
 import random
-from pathlib import Path
-from typing import List
-
+import json
 from PIL import Image, ImageDraw, ImageFont
 
-# We import our Hindi line generator (already Hindi-only)
-from generate_text import get_krishna_line
+# --- Paths ---
+IMAGE_DIR = "images"
+OUTPUT_DIR = "output"
+DATA_DIR = "data"
 
-# Directories
-IMAGES_DIR = Path("images")
-OUTPUT_DIR = Path("output")
-OUTPUT_PATH = OUTPUT_DIR / "frame.png"
+LAST_LINE_FILE = os.path.join(DATA_DIR, "last_line.txt")
+USED_IMAGES_FILE = os.path.join(DATA_DIR, "used_images.json")
+FONT_PATH = os.path.join("fonts", "NotoSansDevanagari-Regular.ttf")  # Hindi font
 
-# Canvas size (1080x1920 reel)
-CANVAS_SIZE = (1080, 1920)
-
-# Local Devanagari font inside repo
-FONT_PATH = Path("fonts") / "NotoSansDevanagari-Regular.ttf"
-
-
-def pick_random_image() -> Path:
-    files: List[Path] = [
-        p for p in IMAGES_DIR.iterdir()
-        if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
-    ]
-    if not files:
-        raise RuntimeError("No images found in images/ folder.")
-    choice = random.choice(files)
-    print(f"🎨 Selected base image: {choice}")
-    return choice
+# --- Canvas settings ---
+CANVAS_WIDTH = 1080
+CANVAS_HEIGHT = 1920
+TEXT_BOX_MARGIN = 80  # margin left/right inside canvas
+TEXT_BOTTOM_MARGIN = 260  # distance from bottom
+TEXT_MAX_LINES = 3
+FONT_SIZE = 64
 
 
-def get_font(size: int) -> ImageFont.FreeTypeFont:
+def ensure_dirs():
+    """Make sure output folder exists."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ---------- TEXT HELPERS ----------
+
+def load_last_line() -> str:
+    """Read the last generated Hindi line from file."""
+    if not os.path.exists(LAST_LINE_FILE):
+        raise FileNotFoundError(f"{LAST_LINE_FILE} not found. Run generate_text.py first.")
+    with open(LAST_LINE_FILE, "r", encoding="utf-8") as f:
+        line = f.read().strip()
+    if not line:
+        raise ValueError("last_line.txt is empty.")
+    return line
+
+
+def wrap_text(text: str, font: ImageFont.FreeTypeFont,
+              max_width: int, draw: ImageDraw.ImageDraw):
     """
-    Always try our own Hindi-capable font first.
-    This fixes the 'square boxes' problem on GitHub runners.
+    Wrap Hindi text into multiple lines so that each line
+    fits inside max_width.
     """
-    # 1) Our bundled Devanagari font
-    if FONT_PATH.exists():
-        try:
-            print(f"🧩 Using bundled font: {FONT_PATH}")
-            return ImageFont.truetype(str(FONT_PATH), size=size)
-        except Exception as e:
-            print("⚠️ Failed to load bundled font, trying system fonts:", e)
-
-    # 2) Fallback to some common system fonts (in case you run locally)
-    candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                print(f"🧩 Using system font: {path}")
-                return ImageFont.truetype(path, size=size)
-            except Exception:
-                continue
-
-    # 3) Last resort
-    print("⚠️ Falling back to default font (may not support Hindi).")
-    return ImageFont.load_default()
-
-
-def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw) -> str:
-    words = text.split()
-    if not words:
-        return ""
+    words = text.split(" ")
     lines = []
-    current = words[0]
-    for w in words[1:]:
-        test = current + " " + w
-        w_len = draw.textlength(test, font=font)
-        if w_len <= max_width:
-            current = test
+    current = ""
+
+    for word in words:
+        test_line = (current + " " + word).strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        line_width = bbox[2] - bbox[0]
+        if line_width <= max_width:
+            current = test_line
         else:
-            lines.append(current)
-            current = w
-    lines.append(current)
-    return "\n".join(lines)
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    # Hard limit lines if needed
+    if len(lines) > TEXT_MAX_LINES:
+        lines = lines[:TEXT_MAX_LINES]
+
+    return lines
 
 
-def draw_centered_text(canvas: Image.Image, text: str) -> Image.Image:
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    W, H = canvas.size
+# ---------- IMAGE MEMORY HELPERS ----------
 
-    # Use bottom ~35% of the image for text
-    margin_x = int(W * 0.08)
-    bottom_height = int(H * 0.35)
-    area_top = H - bottom_height
-    area_bottom = H - int(H * 0.05)
+def load_used_images():
+    """Load list of already used image filenames from JSON."""
+    if not os.path.exists(USED_IMAGES_FILE):
+        return []
+    try:
+        with open(USED_IMAGES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
 
-    font = get_font(size=56)
 
-    max_text_width = W - 2 * margin_x
-    wrapped = wrap_text(text, font, max_text_width, draw)
+def save_used_images(used_list):
+    """Save updated used image list to JSON."""
+    with open(USED_IMAGES_FILE, "w", encoding="utf-8") as f:
+        json.dump(used_list, f, ensure_ascii=False, indent=2)
 
-    # Measure text block
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, align="center")
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
 
-    x = (W - text_w) // 2
-    y = area_top + (bottom_height - text_h) // 2
+def pick_unique_image() -> str:
+    """
+    Pick an image from IMAGE_DIR that has not been used yet.
+    When all images are used, reset the list and start again.
+    Returns the full path to the chosen image.
+    """
+    all_files = [
+        f for f in os.listdir(IMAGE_DIR)
+        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    ]
+    if not all_files:
+        raise FileNotFoundError(f"No images found in {IMAGE_DIR}")
 
-    # Background rectangle behind text
-    pad = 40
-    rect = (
-        x - pad,
-        y - pad,
-        x + text_w + pad,
-        y + text_h + pad,
+    used = load_used_images()
+
+    # Images that are not used yet
+    available = [f for f in all_files if f not in used]
+
+    # If everything has been used, reset
+    if not available:
+        print("✅ All images used once — resetting used_images.json")
+        used = []
+        available = all_files
+
+    chosen = random.choice(available)
+    print(f"🎨 Using Krishna image: {chosen}")
+
+    # Update memory and save
+    used.append(chosen)
+    save_used_images(used)
+
+    return os.path.join(IMAGE_DIR, chosen)
+
+
+# ---------- DRAWING ----------
+
+def create_canvas_with_image(img_path: str) -> Image.Image:
+    """
+    Create a 1080x1920 canvas with the Krishna image centered,
+    keeping aspect ratio (no distortion).
+    """
+    base = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), (0, 0, 0))
+
+    img = Image.open(img_path).convert("RGB")
+    w, h = img.size
+
+    # Scale to fit inside canvas while keeping aspect ratio
+    ratio = min(CANVAS_WIDTH / w, CANVAS_HEIGHT / h)
+    new_w = int(w * ratio)
+    new_h = int(h * ratio)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Center on canvas
+    offset_x = (CANVAS_WIDTH - new_w) // 2
+    offset_y = (CANVAS_HEIGHT - new_h) // 2
+    base.paste(img, (offset_x, offset_y))
+
+    return base
+
+
+def draw_text_box(canvas: Image.Image, line: str) -> Image.Image:
+    """Draw the Hindi text in a semi-transparent box near the bottom."""
+    draw = ImageDraw.Draw(canvas)
+
+    # Load font
+    try:
+        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+    except OSError:
+        # Fallback system font (in case font file missing)
+        font = ImageFont.load_default()
+        print("⚠️ Could not load Hindi font, using default.")
+
+    max_text_width = CANVAS_WIDTH - 2 * TEXT_BOX_MARGIN
+
+    # Wrap text
+    wrapped_lines = wrap_text(line, font, max_text_width, draw)
+
+    # Measure total text height
+    line_heights = []
+    max_line_width = 0
+    for l in wrapped_lines:
+        bbox = draw.textbbox((0, 0), l, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        max_line_width = max(max_line_width, w)
+        line_heights.append(h)
+
+    total_text_height = sum(line_heights) + (len(line_heights) - 1) * 10
+
+    # Text box coordinates
+    box_width = max_line_width + 40
+    box_height = total_text_height + 40
+
+    box_left = (CANVAS_WIDTH - box_width) // 2
+    box_top = CANVAS_HEIGHT - TEXT_BOTTOM_MARGIN - box_height
+    box_right = box_left + box_width
+    box_bottom = box_top + box_height
+
+    # Draw semi-transparent rectangle
+    box_color = (0, 0, 0, 180)
+    # Need RGBA for alpha rectangle
+    if canvas.mode != "RGBA":
+        canvas = canvas.convert("RGBA")
+        draw = ImageDraw.Draw(canvas)
+
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rounded_rectangle(
+        [box_left, box_top, box_right, box_bottom],
+        radius=30,
+        fill=box_color,
     )
-    draw.rectangle(rect, fill=(0, 0, 0, 160))  # semi-transparent black
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
 
-    # White Hindi text
-    draw.multiline_text((x, y), wrapped, font=font, fill=(255, 255, 255, 255), align="center")
-    return canvas
+    # Draw text line by line centered
+    current_y = box_top + 20
+    for i, l in enumerate(wrapped_lines):
+        bbox = draw.textbbox((0, 0), l, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        x = CANVAS_WIDTH // 2 - w // 2
+        draw.text((x, current_y), l, font=font, fill=(255, 255, 255, 255))
+        current_y += h + 10
 
-
-def create_frame() -> Path:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1) Base image
-    img_path = pick_random_image()
-    base = Image.open(img_path).convert("RGB")
-
-    # 2) Create 1080x1920 canvas and fit image
-    canvas = Image.new("RGB", CANVAS_SIZE, (0, 0, 0))
-    base_ratio = base.width / base.height
-    canvas_ratio = CANVAS_SIZE[0] / CANVAS_SIZE[1]
-
-    if base_ratio > canvas_ratio:
-        # Image is wider → fit by height
-        new_height = CANVAS_SIZE[1]
-        new_width = int(new_height * base_ratio)
-    else:
-        # Image is taller → fit by width
-        new_width = CANVAS_SIZE[0]
-        new_height = int(new_width / base_ratio)
-
-    resized = base.resize((new_width, new_height), Image.LANCZOS)
-    x = (CANVAS_SIZE[0] - new_width) // 2
-    y = (CANVAS_SIZE[1] - new_height) // 2
-    canvas.paste(resized, (x, y))
-
-    # 3) Get Hindi Krishna line
-    line = get_krishna_line()
-    print(f"📝 Final line for overlay: {line}")
-
-    # 4) Draw text overlay
-    canvas = draw_centered_text(canvas, line)
-
-    # 5) Save frame
-    canvas.save(OUTPUT_PATH)
-    print(f"✅ Saved frame to {OUTPUT_PATH}")
-    return OUTPUT_PATH
+    # Convert back to RGB for video
+    return canvas.convert("RGB")
 
 
 def main():
-    create_frame()
+    ensure_dirs()
+
+    # 1) Get unique image
+    img_path = pick_unique_image()
+
+    # 2) Load Hindi line from previous step
+    line = load_last_line()
+    print(f"🕉️ Using Hindi line: {line}")
+
+    # 3) Compose image
+    canvas = create_canvas_with_image(img_path)
+    canvas = draw_text_box(canvas, line)
+
+    # 4) Save frame for video creator
+    output_path = os.path.join(OUTPUT_DIR, "frame.png")
+    canvas.save(output_path, format="PNG")
+    print(f"✅ Saved Krishna frame with text to {output_path}")
 
 
 if __name__ == "__main__":
