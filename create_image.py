@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-# We import the Hindi line generator
+# Hindi line generator (Gemini) – we only call it if last_line.txt is missing/empty
 from generate_text import generate_unique_krishna_line
 
 # ---------- Paths & constants ----------
@@ -27,7 +27,7 @@ DEVANAGARI_FONT_CANDIDATES = [
 
 FONT_SIZE = 60
 TEXT_BOX_HEIGHT = 260      # height of dark band at bottom
-LINE_SPACING = 10          # spacing between lines in pixels
+LINE_SPACING = 10          # spacing between wrapped lines
 
 
 # ---------- Utility helpers ----------
@@ -40,7 +40,7 @@ def ensure_dirs():
 def load_last_line() -> str:
     """
     Read last Hindi line from last_line.txt.
-    If missing or empty, ask Gemini for a fresh one and save it.
+    If missing / empty, ask Gemini for a fresh one and save it.
     """
     ensure_dirs()
 
@@ -49,9 +49,9 @@ def load_last_line() -> str:
         if text:
             return text
         else:
-            print("⚠️ last_line.txt empty, generating new line from Gemini...")
+            print("⚠️ last_line.txt is empty, generating a new line from Gemini...")
     else:
-        print("⚠️ last_line.txt missing, generating new line from Gemini...")
+        print("⚠️ last_line.txt missing, generating a new line from Gemini...")
 
     line = generate_unique_krishna_line()
     LAST_LINE_FILE.write_text(line, encoding="utf-8")
@@ -81,7 +81,7 @@ def choose_random_image() -> Path:
 
 def create_base_canvas(image_path: Path) -> Image.Image:
     """
-    Create a 1080x1920 black canvas and paste the image centered,
+    Create a 1080x1920 black canvas and paste the Krishna image centered,
     scaled to cover.
     """
     base = Image.new("RGB", (TARGET_WIDTH, TARGET_HEIGHT), (0, 0, 0))
@@ -97,10 +97,24 @@ def create_base_canvas(image_path: Path) -> Image.Image:
     return base
 
 
+# ---- text measurement helpers using textbbox (NOT textsize) ----
+
+def get_text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont):
+    """
+    Measure text width/height using textbbox, which exists in new Pillow.
+    """
+    if not text:
+        return 0, 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    return width, height
+
+
 def wrap_text(text: str, font: ImageFont.ImageFont,
               max_width: int, draw: ImageDraw.ImageDraw) -> str:
     """
-    Simple word wrap using draw.textsize so it works on older Pillow.
+    Simple word wrap using textbbox so it works on GitHub Actions Pillow.
     """
     words = text.split()
     lines = []
@@ -108,12 +122,11 @@ def wrap_text(text: str, font: ImageFont.ImageFont,
 
     for w in words:
         test = (current + " " + w).strip()
-        width, _ = draw.textsize(test, font=font)
-        if width <= max_width:
+        width, _ = get_text_size(draw, test, font)
+        if width <= max_width or not current:
             current = test
         else:
-            if current:
-                lines.append(current)
+            lines.append(current)
             current = w
 
     if current:
@@ -125,19 +138,22 @@ def wrap_text(text: str, font: ImageFont.ImageFont,
 def measure_multiline(text: str, font: ImageFont.ImageFont,
                       draw: ImageDraw.ImageDraw):
     """
-    Replacement for multiline_textsize, compatible with older Pillow.
-    Returns (width, height).
+    Replacement for multiline_textsize.
+    Returns (width, height) calculated line by line.
     """
+    if not text:
+        return 0, 0
+
     lines = text.split("\n")
     max_w = 0
     total_h = 0
     for line in lines:
-        w, h = draw.textsize(line, font=font)
+        w, h = get_text_size(draw, line, font)
         if w > max_w:
             max_w = w
         total_h += h + LINE_SPACING
-    if lines:
-        total_h -= LINE_SPACING  # remove last extra spacing
+
+    total_h -= LINE_SPACING  # remove last extra spacing
     return max_w, total_h
 
 
@@ -146,6 +162,7 @@ def draw_text_with_bg(canvas: Image.Image, text: str,
     """
     Draw a semi-transparent dark band at the bottom,
     then draw wrapped Hindi text centered inside.
+    Returns (canvas, (box_top, box_bottom)) so stickers can be placed near it.
     """
     canvas = canvas.convert("RGBA")
     draw = ImageDraw.Draw(canvas)
@@ -153,7 +170,7 @@ def draw_text_with_bg(canvas: Image.Image, text: str,
     box_top = TARGET_HEIGHT - TEXT_BOX_HEIGHT
     box_bottom = TARGET_HEIGHT
 
-    # Dark band
+    # Dark band overlay
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     o_draw = ImageDraw.Draw(overlay)
     o_draw.rectangle([(0, box_top), (TARGET_WIDTH, box_bottom)],
@@ -168,11 +185,11 @@ def draw_text_with_bg(canvas: Image.Image, text: str,
     x = (TARGET_WIDTH - text_w) // 2
     y = box_top + (TEXT_BOX_HEIGHT - text_h) // 2
 
-    # Draw line by line with shadow so it pops
+    # Draw each line with a small shadow
     lines = wrapped.split("\n")
     current_y = y
     for line in lines:
-        w, h = draw.textsize(line, font=font)
+        w, h = get_text_size(draw, line, font)
         line_x = (TARGET_WIDTH - w) // 2
 
         # shadow
@@ -190,6 +207,9 @@ def draw_text_with_bg(canvas: Image.Image, text: str,
 # ---------- Sticker / emoji image logic ----------
 
 def load_sticker_paths():
+    """
+    Load PNG stickers from stickers/ folder.
+    """
     if not STICKERS_DIR.exists():
         print(f"⚠️ Stickers folder not found: {STICKERS_DIR}")
         return []
@@ -215,10 +235,11 @@ def paste_stickers(canvas: Image.Image, text_band, sticker_paths):
     canvas = canvas.convert("RGBA")
     box_top, box_bottom = text_band
 
+    # positions for up to 3 stickers
     positions = [
         (int(TARGET_WIDTH * 0.23), box_top + 40),
         (int(TARGET_WIDTH * 0.77), box_top + 40),
-        (int(TARGET_WIDTH * 0.5), box_bottom - 70),
+        (int(TARGET_WIDTH * 0.50), box_bottom - 70),
     ]
 
     chosen = random.sample(sticker_paths, k=min(3, len(sticker_paths)))
@@ -230,6 +251,7 @@ def paste_stickers(canvas: Image.Image, text_band, sticker_paths):
             print(f"⚠️ Could not open sticker {sticker_path.name}: {e}")
             continue
 
+        # Resize to max about 120px
         max_size = 120
         scale = max(
             sticker.width / max_size,
@@ -259,9 +281,13 @@ def main():
     font = choose_font()
     image_path = choose_random_image()
 
+    # Base Krishna image
     canvas = create_base_canvas(image_path)
+
+    # Draw text band
     canvas, text_band = draw_text_with_bg(canvas, line, font)
 
+    # Stickers
     sticker_paths = load_sticker_paths()
     canvas = paste_stickers(canvas, text_band, sticker_paths)
 
