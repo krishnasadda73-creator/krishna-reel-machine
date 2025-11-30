@@ -4,6 +4,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Import the line generator from generate_text.py
+from generate_text import generate_unique_krishna_line
+
 # ---------- Paths & constants ----------
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -34,12 +37,26 @@ def ensure_output_dir():
 
 
 def load_last_line() -> str:
-    """Read the last generated Hindi line from data/last_line.txt."""
+    """
+    Read the last generated Hindi line from data/last_line.txt.
+    If file is missing or empty, call Gemini to generate a fresh line,
+    save it, and return it.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     if not LAST_LINE_FILE.exists():
-        raise FileNotFoundError(f"Last line file not found: {LAST_LINE_FILE}")
+        print("⚠️ last_line.txt not found — generating a fresh line with Gemini...")
+        line = generate_unique_krishna_line()
+        LAST_LINE_FILE.write_text(line, encoding="utf-8")
+        return line
+
     text = LAST_LINE_FILE.read_text(encoding="utf-8").strip()
     if not text:
-        raise ValueError("Last line file is empty.")
+        print("⚠️ last_line.txt is empty — generating a fresh line with Gemini...")
+        line = generate_unique_krishna_line()
+        LAST_LINE_FILE.write_text(line, encoding="utf-8")
+        return line
+
     return text
 
 
