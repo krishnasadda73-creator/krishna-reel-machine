@@ -8,7 +8,6 @@ from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
-# We reuse the last Hindi line for YouTube title/description
 from generate_text import clean_text
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -61,10 +60,36 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=creds)
 
 
+def find_latest_video() -> Path | None:
+    """
+    Try to find the newest .mp4 file.
+    1) Prefer output/*.mp4
+    2) Fallback: repo_root/*.mp4
+    """
+    candidates: list[Path] = []
+
+    if OUTPUT_DIR.exists():
+        candidates.extend(OUTPUT_DIR.glob("*.mp4"))
+
+    candidates.extend(ROOT_DIR.glob("*.mp4"))
+
+    if not candidates:
+        return None
+
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return latest
+
+
 def upload_video(video_path: Path):
     if not video_path.exists():
-        print(f"❌ Video file not found: {video_path}")
-        sys.exit(1)
+        print(f"❌ Provided video path does not exist: {video_path}")
+        print("🔍 Trying to auto-detect latest .mp4 instead...")
+        auto = find_latest_video()
+        if not auto:
+            print("❌ No .mp4 file found in output/ or repo root.")
+            sys.exit(1)
+        print(f"✅ Found video: {auto}")
+        video_path = auto
 
     service = get_youtube_service()
 
@@ -84,7 +109,7 @@ def upload_video(video_path: Path):
         "snippet": {
             "title": title,
             "description": description,
-            "categoryId": "22",  # People & Blogs (safe default)
+            "categoryId": "22",  # People & Blogs
             "tags": [
                 "krishna",
                 "bhakti",
@@ -107,7 +132,7 @@ def upload_video(video_path: Path):
         resumable=True,
     )
 
-    print("📤 Starting upload to YouTube...")
+    print(f"📤 Starting upload to YouTube with file: {video_path}")
     request = service.videos().insert(
         part="snippet,status",
         body=body,
@@ -126,7 +151,8 @@ def upload_video(video_path: Path):
 
 
 def main():
-    # Default path: output/reel.mp4
+    # If a path is passed AND exists, use it.
+    # If it doesn't exist, we'll auto-detect inside upload_video().
     if len(sys.argv) > 1:
         video_path = Path(sys.argv[1])
     else:
