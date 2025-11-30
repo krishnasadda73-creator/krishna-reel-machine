@@ -1,14 +1,12 @@
 name: Krishna Reels Auto Upload
 
 on:
-  # Manual run
+  # Run manually from the Actions tab
   workflow_dispatch:
-  # Schedule: two times per day (adjust to your taste)
-  schedule:
-    # Around 7:30 AM IST  ≈ 02:00 UTC
-    - cron: "0 2 * * *"
-    # Around 8:00 PM IST ≈ 14:30 UTC
-    - cron: "30 14 * * *"
+  # (Optional) Schedule – 02:00 UTC ≈ 7:30 AM IST
+  # uncomment if you want auto daily runs
+  # schedule:
+  #   - cron: "0 2 * * *"
 
 jobs:
   build:
@@ -23,10 +21,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies (ffmpeg)
+      - name: Install system dependencies (ffmpeg + fonts)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-color-emoji
 
       - name: Install Python dependencies
         run: |
@@ -40,15 +38,32 @@ jobs:
           echo "YT_CLIENT_SECRET=${{ secrets.YT_CLIENT_SECRET }}" >> $GITHUB_ENV
           echo "YT_REFRESH_TOKEN=${{ secrets.YT_REFRESH_TOKEN }}" >> $GITHUB_ENV
 
-      - name: Generate Krishna frame (image + Hindi text)
+      - name: Generate Krishna image frame (image + Hindi text)
         run: |
-          python generate_text.py
           python create_image.py
 
       - name: Create reel video with BGM
         run: |
           python create_video.py
 
+      - name: Upload reel as artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: krishna-reel
+          path: output/*.mp4
+
       - name: Upload reel to YouTube
         run: |
-          python youtube_upload.py output/reel.mp4
+          echo "📁 Listing files in output/:"
+          ls -R output || echo "output/ folder not found"
+
+          # Pick the first .mp4 inside output/
+          VIDEO_FILE=$(ls output/*.mp4 | head -n 1 || true)
+
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ No .mp4 video found in output/ — nothing to upload."
+            exit 1
+          fi
+
+          echo "✅ Found video file: $VIDEO_FILE"
+          python youtube_upload.py "$VIDEO_FILE"
