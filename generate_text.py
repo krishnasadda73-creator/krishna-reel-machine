@@ -1,201 +1,185 @@
 import os
 import json
-import time
 import random
-from pathlib import Path
+from typing import List
 
 import google.generativeai as genai
 
-# --------------------------------------------------
+# -----------------------------
 # Config
-# --------------------------------------------------
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+# -----------------------------
 
-USED_TEXTS_FILE = DATA_DIR / "used_texts.json"
+USED_TEXTS_FILE = "data/used_texts.json"
 
+# Safe-ish fallback Hindi lines (Krishna themed, deep + short)
+FALLBACK_LINES: List[str] = [
+    "जब सब रास्ते बंद हो जाएँ, तब श्रीकृष्ण का रास्ता खुल जाता है। ✿",
+    "मन की हर उलझन सुलझ जाती है, जब विश्वास श्रीकृष्ण पर हो। ♡",
+    "जिसे कृष्ण संभाल रहे हों, उसे दुनिया की चिंता करने की ज़रूरत नहीं। ❀",
+    "कृष्ण पर छोड़ दो, वो वहाँ रास्ता बनाएँगे जहाँ कोई रास्ता दिखता भी नहीं। ♥",
+    "कृष्ण का नाम लेने वाला कभी अकेला नहीं चलता। ✿",
+    "जितना भरोसा कृष्ण पर बढ़ाते जाओगे, उतना डर अपने आप घटता जाएगा। ♡",
+    "कृष्ण की मर्जी पर राज़ी हो जाओ, दिल अपने आप हल्का हो जाएगा। ❀",
+    "हर टूटे दिल की मरहम — बस एक नाम, श्रीकृष्ण। ♥",
+    "कृष्ण चुप रहते हैं, लेकिन कभी गलत नहीं करते। ✿",
+    "जो हो रहा है, वही तुम्हारे लिए सही है — ये भरोसा कृष्ण देते हैं। ♡",
+]
+
+# Gemini model name (from your successful test_gemini run)
 GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
-MAX_RETRIES = 6
-
-# Symbols that are usually supported in normal fonts (NOT color emojis)
-# These give a cute bhakti vibe without turning into squares.
-CUTE_SYMBOLS = ["♥", "♡", "❣", "✿", "★", "☆", "✧"]
 
 
-# --------------------------------------------------
-# Helpers for used-text tracking
-# --------------------------------------------------
-def load_used_texts():
-    if USED_TEXTS_FILE.exists():
-        try:
-            with open(USED_TEXTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-    return []
+# -----------------------------
+# Utils for storing used texts
+# -----------------------------
 
-
-def save_used_texts(texts):
-    try:
+def load_used_texts() -> List[str]:
+    os.makedirs(os.path.dirname(USED_TEXTS_FILE), exist_ok=True)
+    if not os.path.exists(USED_TEXTS_FILE):
         with open(USED_TEXTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(texts, f, ensure_ascii=False, indent=2)
+            json.dump([], f, ensure_ascii=False, indent=2)
+        return []
+    try:
+        with open(USED_TEXTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        pass
+        # If file corrupted, reset
+        return []
 
 
-def normalize_text(text: str) -> str:
-    return " ".join(text.strip().split())
+def save_used_texts(texts: List[str]) -> None:
+    os.makedirs(os.path.dirname(USED_TEXTS_FILE), exist_ok=True)
+    with open(USED_TEXTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(texts, f, ensure_ascii=False, indent=2)
 
 
-def strip_to_hindi_and_symbols(text: str) -> str:
-    """
-    Keep only:
-      - Devanagari characters
-      - basic punctuation
-      - our allowed cute symbols
-    This prevents weird squares in the video.
-    """
-    allowed_extra = set(CUTE_SYMBOLS)
-    cleaned_chars = []
-    for ch in text:
-        code = ord(ch)
-        if 0x0900 <= code <= 0x097F:  # Devanagari block
-            cleaned_chars.append(ch)
-        elif ch in " .,!?:;—-…'\"।॥":
-            cleaned_chars.append(ch)
-        elif ch in allowed_extra:
-            cleaned_chars.append(ch)
-    return "".join(cleaned_chars).strip()
+# -----------------------------
+# Gemini helpers
+# -----------------------------
 
-
-# --------------------------------------------------
-# Gemini setup
-# --------------------------------------------------
-def get_gemini_client():
+def setup_gemini() -> genai.GenerativeModel:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY env var not set")
+        raise RuntimeError("GEMINI_API_KEY not set in environment.")
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(GEMINI_MODEL_NAME)
 
 
-# Base prompt: pure Hindi, no emojis, one deep line
-BASE_PROMPT = """
-आप एक रील के लिए छोटी, गहरी और दिल छू लेने वाली कृष्ण भक्तिमय पंक्ति लिख रहे हैं।
+def call_gemini_for_line() -> str:
+    """
+    Ask Gemini for one short, deep Krishna-themed Hindi line.
+    We explicitly ask NOT to use emoji characters, only simple cute symbols.
+    """
+    model = setup_gemini()
 
-कड़ाई से नियम:
-- भाषा: केवल हिन्दी, देवनागरी लिपि में।
-- 1 ही पंक्ति लिखें।
-- शब्द सीमा: लगभग 8–18 शब्द।
-- लाइन बहुत गहरी, पॉज़िटिव और कृष्ण-केंद्रित हो:
-  • भरोसा, समर्पण, सुरक्षा, धैर्य, प्रतीक्षा, टूटने के बाद संभलना, उम्मीद, शरण, प्रेम।
-- टोन कुछ ऐसा हो (इनको कॉपी मत करना, सिर्फ भावना समझें):
-  1) "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं।"
-  2) "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे।"
-  3) "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं।"
-  4) "हर टूटे दिल की दवा सिर्फ एक — श्रीकृष्ण।"
-  5) "कृष्ण की शरण में गए तो फिर किसी सहारे की ज़रूरत नहीं।"
+    prompt = """
+तुम्हारा काम है एक बहुत छोटा, बहुत गहरा और पॉज़िटिव कृष्ण-कोट देना।
+शर्तें:
+- भाषा: केवल शुद्ध और आसान हिन्दी।
+- विषय: भरोसा, surrender, शांति, कृष्ण का सहारा, डर का खत्म होना।
+- लम्बाई: ज़्यादा से ज़्यादा 1–2 छोटी लाइनें (10–18 शब्द)।
+- स्टाइल: इंस्टाग्राम रील टेक्स्ट जैसा, बहुत relatable और दिल को छू लेने वाला।
+- इमोजी: ❌ कोई भी emoji मत use करो (जैसे ❤️ 🙂 🌸)।
+- केवल ये symbols use कर सकते हो: ♥ ♡ ✿ ❀ ❁ ✧ ✨
+- आउटपुट: सिर्फ़ लाइन लिखो, कोई extra explanation या quotes (“ ”) मत लगाओ।
 
-सख्त मना:
-- कोई इमोजी नहीं।
-- अंग्रेज़ी शब्द, हैशटैग, नंबर, उद्धरणचिह्न आदि नहीं।
-- "कैप्शन", "रील", "वीडियो", "इंस्टाग्राम" जैसे शब्द नहीं।
-
-केवल एक तैयार पंक्ति देवनागरी में लौटाएँ, उसके आगे-पीछे कुछ भी अतिरिक्त न लिखें।
+उदाहरण स्टाइल (बस अंदाज़ समझने के लिए):
+- "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं। ♡"
+- "जहाँ भरोसा कृष्ण पर हो, वहाँ डर टिक ही नहीं सकता। ✿"
+- "कृष्ण पर छोड़ दो, वो तुम्हें कभी गिरने नहीं देंगे। ♥"
 """
 
+    resp = model.generate_content(prompt)
 
-def ask_gemini_for_line(model) -> str | None:
-    try:
-        resp = model.generate_content(BASE_PROMPT)
-    except Exception as e:
-        print(f"❌ Gemini error while generating text: {e}")
-        return None
-
-    # Normal way for new SDK
-    raw = getattr(resp, "text", None)
-    if not raw:
-        # Fallback to older style
+    # For google-generativeai >= 0.8, text is in .text
+    text = getattr(resp, "text", None)
+    if not text:
+        # Some versions return candidates; handle that too
         try:
-            raw = resp.candidates[0].content.parts[0].text
+            if resp.candidates and resp.candidates[0].content.parts:
+                maybe = resp.candidates[0].content.parts[0].text
+                text = maybe
         except Exception:
-            raw = None
+            pass
 
-    if not raw:
-        return None
+    if not text:
+        raise RuntimeError("Gemini did not return text.")
 
-    raw = raw.strip().replace("\n", " ")
-    raw = normalize_text(raw)
-
-    # Only keep Hindi + allowed symbols
-    cleaned = strip_to_hindi_and_symbols(raw)
-    cleaned = normalize_text(cleaned)
-
-    if not cleaned:
-        return None
-
-    return cleaned
+    return clean_text(text)
 
 
-def add_cute_symbols(line: str) -> str:
+# -----------------------------
+# Cleaning & uniqueness
+# -----------------------------
+
+def clean_text(raw: str) -> str:
+    """Normalize whitespace and strip quotes / spaces."""
+    line = raw.strip()
+    # Remove surrounding quotes if present
+    if (line.startswith('"') and line.endswith('"')) or (line.startswith("“") and line.endswith("”")):
+        line = line[1:-1].strip()
+
+    # Gemini sometimes adds bullet or dash at start
+    if line.startswith("- "):
+        line = line[2:].strip()
+
+    # Collapse multiple spaces/newlines
+    line = " ".join(line.split())
+    return line
+
+
+def generate_unique_krishna_line(max_attempts: int = 6) -> str:
+    used = load_used_texts()
+
+    # First try Gemini a few times
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"👉 Gemini attempt {attempt}...")
+            candidate = call_gemini_for_line()
+            print(f"   Candidate: {candidate}")
+            if candidate and candidate not in used:
+                used.append(candidate)
+                save_used_texts(used)
+                return candidate
+        except Exception as e:
+            print(f"   Gemini error on attempt {attempt}: {e}")
+            last_error = e
+
+    print("⚠️ Falling back to local Hindi lines...")
+    # Fallback: pick from hardcoded list, also avoiding duplicates
+    random.shuffle(FALLBACK_LINES)
+    for line in FALLBACK_LINES:
+        cleaned = clean_text(line)
+        if cleaned not in used:
+            used.append(cleaned)
+            save_used_texts(used)
+            return cleaned
+
+    # Absolute last resort
+    if FALLBACK_LINES:
+        return clean_text(FALLBACK_LINES[0])
+
+    raise RuntimeError(f"Unable to generate line, last Gemini error: {last_error}")
+
+
+# -----------------------------
+# PUBLIC API for other scripts
+# -----------------------------
+
+def get_krishna_line() -> str:
     """
-    Randomly add 0–2 cute symbols at the end,
-    separated by a space, e.g.
-    '... कृष्ण पर भरोसा हो।  ♥✿'
+    This is the function used by create_image.py.
+    It returns one unique, deep Hindi Krishna line.
     """
-    # 50% chance to add symbols
-    if random.random() < 0.4:
-        return line
-
-    count = random.choice([1, 2])
-    chosen = random.sample(CUTE_SYMBOLS, k=count)
-    suffix = "".join(chosen)
-    # two spaces so text is slightly separated from sentence end
-    return f"{line}  {suffix}"
+    return generate_unique_krishna_line()
 
 
-# --------------------------------------------------
-# Main public function
-# --------------------------------------------------
-def generate_unique_krishna_line() -> str:
-    used_texts = load_used_texts()
-    used_set = {normalize_text(t) for t in used_texts}
-
-    model = get_gemini_client()
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"👉 Gemini attempt {attempt}...")
-        base_line = ask_gemini_for_line(model)
-
-        if not base_line:
-            print("   Got empty/invalid line, retrying...")
-            time.sleep(1.5)
-            continue
-
-        # Add cute symbols after Gemini to avoid confusing the model
-        line = add_cute_symbols(base_line)
-        norm = normalize_text(line)
-
-        if norm in used_set:
-            print("   Duplicate line detected, trying again...")
-            time.sleep(1.0 + random.random())
-            continue
-
-        print(f"   ✅ Final Krishna line: {line}")
-        used_texts.append(line)
-
-        if len(used_texts) > 1000:
-            used_texts = used_texts[-800:]
-
-        save_used_texts(used_texts)
-        return line
-
-    fallback = "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं।  ♥"
-    print(f"⚠️ Using fallback line after {MAX_RETRIES} failed attempts: {fallback}")
-    return fallback
-
+# -----------------------------
+# CLI usage (manual test)
+# -----------------------------
 
 if __name__ == "__main__":
-    print(generate_unique_krishna_line())
+    line = get_krishna_line()
+    print("Generated Krishna line:")
+    print(line)
