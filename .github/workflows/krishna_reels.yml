@@ -1,12 +1,12 @@
 name: Krishna Reels Auto Upload
 
 on:
-  # Run manually from the Actions tab
   workflow_dispatch:
-  # (Optional) Schedule – 02:00 UTC ≈ 7:30 AM IST
-  # uncomment if you want auto daily runs
-  # schedule:
-  #   - cron: "0 2 * * *"
+  schedule:
+    # 02:00 UTC = 7:30 AM IST
+    - cron: "0 2 * * *"
+    # 14:00 UTC = 7:30 PM IST
+    - cron: "0 14 * * *"
 
 jobs:
   build:
