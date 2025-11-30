@@ -1,195 +1,201 @@
 import os
 import json
+import time
 import random
-import re
 from pathlib import Path
 
 import google.generativeai as genai
 
-# ---- CONFIG ----
-MODEL_NAME = "models/gemini-2.5-flash"
+# --------------------------------------------------
+# Config
+# --------------------------------------------------
 DATA_DIR = Path("data")
-USED_TEXTS_PATH = DATA_DIR / "used_texts.json"
+DATA_DIR.mkdir(exist_ok=True)
 
-EMOJIS = ["❤️", "💙", "🌸", "🌼", "🦚", "🕊️", "🙏", "✨", "🌿", "🌙", "🪔", "💫"]
+USED_TEXTS_FILE = DATA_DIR / "used_texts.json"
 
-EXAMPLE_LINES = [
-    "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं। ❤️",
-    "जिसने कृष्ण को पाया, उसने सब कुछ पा लिया। 🦚",
-    "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे। 🌿",
-    "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं। ✨",
-    "कृष्ण का नाम ही हर समस्या का समाधान है। 🙏",
-    "कृष्ण की शरण में गए तो फिर किसी सहारे की ज़रूरत नहीं। 🌼",
-    "हर टूटे दिल की दवा सिर्फ़ एक — श्रीकृष्ण। 🕊️",
-    "कृष्ण ने संभाल लिया, अब मुझे किसी बात का डर नहीं। 🌙",
-    "कृष्ण चुप रहते हैं, लेकिन कभी गलत नहीं करते। 🔱",
-]
+GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
+MAX_RETRIES = 6
+
+# Symbols that are usually supported in normal fonts (NOT color emojis)
+# These give a cute bhakti vibe without turning into squares.
+CUTE_SYMBOLS = ["♥", "♡", "❣", "✿", "★", "☆", "✧"]
 
 
-# ---------- used_texts helpers ----------
-
+# --------------------------------------------------
+# Helpers for used-text tracking
+# --------------------------------------------------
 def load_used_texts():
-    if not USED_TEXTS_PATH.exists():
-        return []
+    if USED_TEXTS_FILE.exists():
+        try:
+            with open(USED_TEXTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def save_used_texts(texts):
     try:
-        with USED_TEXTS_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return [str(x) for x in data]
-        return []
+        with open(USED_TEXTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(texts, f, ensure_ascii=False, indent=2)
     except Exception:
-        return []
+        pass
 
 
-def save_used_texts(lines):
-    USED_TEXTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with USED_TEXTS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(lines, f, ensure_ascii=False, indent=2)
+def normalize_text(text: str) -> str:
+    return " ".join(text.strip().split())
 
 
-def normalize_for_compare(text: str) -> str:
-    text = re.sub(r"[^\w\s\u0900-\u097F]", "", text)  # keep Devanagari + letters/digits
-    text = re.sub(r"\s+", " ", text).strip().lower()
-    return text
+def strip_to_hindi_and_symbols(text: str) -> str:
+    """
+    Keep only:
+      - Devanagari characters
+      - basic punctuation
+      - our allowed cute symbols
+    This prevents weird squares in the video.
+    """
+    allowed_extra = set(CUTE_SYMBOLS)
+    cleaned_chars = []
+    for ch in text:
+        code = ord(ch)
+        if 0x0900 <= code <= 0x097F:  # Devanagari block
+            cleaned_chars.append(ch)
+        elif ch in " .,!?:;—-…'\"।॥":
+            cleaned_chars.append(ch)
+        elif ch in allowed_extra:
+            cleaned_chars.append(ch)
+    return "".join(cleaned_chars).strip()
 
 
-def is_too_similar(candidate: str, used_lines) -> bool:
-    cand_norm = normalize_for_compare(candidate)
-    if not cand_norm:
-        return True
-
-    for old in used_lines:
-        old_norm = normalize_for_compare(old)
-        if not old_norm:
-            continue
-        if cand_norm == old_norm:
-            return True
-        if cand_norm in old_norm or old_norm in cand_norm:
-            return True
-    return False
-
-
-# ---------- Gemini interaction ----------
-
-def clean_line(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r'^[\"“”\'‘’]+', "", text)
-    text = re.sub(r'[\"“”\'‘’]+$', "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def configure_gemini():
+# --------------------------------------------------
+# Gemini setup
+# --------------------------------------------------
+def get_gemini_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in environment.")
+        raise RuntimeError("GEMINI_API_KEY env var not set")
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return genai.GenerativeModel(GEMINI_MODEL_NAME)
 
 
-def generate_candidate_line(model) -> str:
-    emoji_str = "".join(EMOJIS)
-
-    prompt = f"""
-आप एक इंस्टाग्राम / यूट्यूब रील्स के लिए शॉर्ट टेक्स्ट लिखने वाले राइटर हैं।
-
-काम:
-- सिर्फ़ एक लाइन लिखिए।
-- भाषा 100% HINDI (देवनागरी)। कोई English शब्द या अक्षर नहीं।
-- फ़ोकस: भगवान कृष्ण / श्रीकृष्ण पर भरोसा, surrender, healing, gratitude, शांति।
-- vibe deep हो लेकिन simple और relatable हो।
-- लंबाई: लगभग 10–16 शब्द।
-- लाइन के अंत में 1–3 प्यारे emoji इन में से लगाइए: {emoji_str}
-
-स्टाइल के लिए कुछ example (इनको कॉपी नहीं करना, बस vibe समझना):
-
-1. "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं।" ❤️
-2. "जिसने कृष्ण को पाया, उसने सब कुछ पा लिया।" 🦚
-3. "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे।" 🌿
-4. "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं।" ✨
-5. "कृष्ण का नाम ही हर समस्या का समाधान है।" 🙏
-6. "हर टूटे दिल की दवा सिर्फ़ एक — श्रीकृष्ण।" 🕊️
-7. "कृष्ण ने संभाल लिया, अब मुझे किसी बात का डर नहीं।" 🌙
+# Base prompt: pure Hindi, no emojis, one deep line
+BASE_PROMPT = """
+आप एक रील के लिए छोटी, गहरी और दिल छू लेने वाली कृष्ण भक्तिमय पंक्ति लिख रहे हैं।
 
 कड़ाई से नियम:
-- लाइन में कम से कम एक नाम ज़रूर हो:
-  कृष्ण / श्रीकृष्ण / कान्हा / श्याम / गोपाल / माधव
-- कोई hashtag नहीं (#), कोई quotes नहीं (" "), कोई English letter नहीं।
-- सिर्फ़ वही एक लाइन लौटाइए, और कुछ नहीं।
+- भाषा: केवल हिन्दी, देवनागरी लिपि में।
+- 1 ही पंक्ति लिखें।
+- शब्द सीमा: लगभग 8–18 शब्द।
+- लाइन बहुत गहरी, पॉज़िटिव और कृष्ण-केंद्रित हो:
+  • भरोसा, समर्पण, सुरक्षा, धैर्य, प्रतीक्षा, टूटने के बाद संभलना, उम्मीद, शरण, प्रेम।
+- टोन कुछ ऐसा हो (इनको कॉपी मत करना, सिर्फ भावना समझें):
+  1) "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं।"
+  2) "कृष्ण पर छोड़ दो, वह तुम्हें संभाल लेंगे।"
+  3) "जहाँ भरोसा कृष्ण पर हो, वहाँ डर कभी टिकता नहीं।"
+  4) "हर टूटे दिल की दवा सिर्फ एक — श्रीकृष्ण।"
+  5) "कृष्ण की शरण में गए तो फिर किसी सहारे की ज़रूरत नहीं।"
+
+सख्त मना:
+- कोई इमोजी नहीं।
+- अंग्रेज़ी शब्द, हैशटैग, नंबर, उद्धरणचिह्न आदि नहीं।
+- "कैप्शन", "रील", "वीडियो", "इंस्टाग्राम" जैसे शब्द नहीं।
+
+केवल एक तैयार पंक्ति देवनागरी में लौटाएँ, उसके आगे-पीछे कुछ भी अतिरिक्त न लिखें।
 """
 
-    print("🕉️ Gemini से हिंदी कृष्ण लाइन माँग रहे हैं...")
-    response = model.generate_content(prompt)
-    text = getattr(response, "text", "").strip()
-    if not text:
-        raise RuntimeError("Gemini से खाली response मिला।")
-    line = clean_line(text)
-    print(f"📜 Candidate: {line}")
-    return line
 
-
-def is_valid_hindi_line(line: str) -> bool:
-    if not re.search(r"[\u0900-\u097F]", line):
-        return False
-    if re.search(r"[A-Za-z]", line):
-        return False
-    if not re.search(r"(कृष्ण|श्रीकृष्ण|कान्हा|श्याम|गोपाल|माधव)", line):
-        return False
-    if len(line.split()) < 4:
-        return False
-    return True
-
-
-def get_krishna_line(max_attempts: int = 10) -> str:
-    """Main function used by create_image.py"""
-    used = load_used_texts()
-    print(f"📚 Used lines so far: {len(used)}")
-
+def ask_gemini_for_line(model) -> str | None:
     try:
-        model = configure_gemini()
+        resp = model.generate_content(BASE_PROMPT)
     except Exception as e:
-        print("⚠️ Gemini config error, fallback to examples:", e)
-        line = random.choice(EXAMPLE_LINES)
-        used.append(line)
-        save_used_texts(used)
+        print(f"❌ Gemini error while generating text: {e}")
+        return None
+
+    # Normal way for new SDK
+    raw = getattr(resp, "text", None)
+    if not raw:
+        # Fallback to older style
+        try:
+            raw = resp.candidates[0].content.parts[0].text
+        except Exception:
+            raw = None
+
+    if not raw:
+        return None
+
+    raw = raw.strip().replace("\n", " ")
+    raw = normalize_text(raw)
+
+    # Only keep Hindi + allowed symbols
+    cleaned = strip_to_hindi_and_symbols(raw)
+    cleaned = normalize_text(cleaned)
+
+    if not cleaned:
+        return None
+
+    return cleaned
+
+
+def add_cute_symbols(line: str) -> str:
+    """
+    Randomly add 0–2 cute symbols at the end,
+    separated by a space, e.g.
+    '... कृष्ण पर भरोसा हो।  ♥✿'
+    """
+    # 50% chance to add symbols
+    if random.random() < 0.4:
         return line
 
-    last_valid = None
+    count = random.choice([1, 2])
+    chosen = random.sample(CUTE_SYMBOLS, k=count)
+    suffix = "".join(chosen)
+    # two spaces so text is slightly separated from sentence end
+    return f"{line}  {suffix}"
 
-    for attempt in range(1, max_attempts + 1):
-        print(f"👉 Attempt {attempt}/{max_attempts}...")
-        try:
-            candidate = generate_candidate_line(model)
-        except Exception as e:
-            print("⚠️ Gemini error:", e)
+
+# --------------------------------------------------
+# Main public function
+# --------------------------------------------------
+def generate_unique_krishna_line() -> str:
+    used_texts = load_used_texts()
+    used_set = {normalize_text(t) for t in used_texts}
+
+    model = get_gemini_client()
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"👉 Gemini attempt {attempt}...")
+        base_line = ask_gemini_for_line(model)
+
+        if not base_line:
+            print("   Got empty/invalid line, retrying...")
+            time.sleep(1.5)
             continue
 
-        if not is_valid_hindi_line(candidate):
-            print("❌ Rejected: pure Hindi नहीं या कृष्ण नाम missing / बहुत छोटा।")
+        # Add cute symbols after Gemini to avoid confusing the model
+        line = add_cute_symbols(base_line)
+        norm = normalize_text(line)
+
+        if norm in used_set:
+            print("   Duplicate line detected, trying again...")
+            time.sleep(1.0 + random.random())
             continue
 
-        if is_too_similar(candidate, used):
-            print("🔁 Rejected: पुराने टेक्स्ट जैसा लग रहा है (duplicate vibe)।")
-            continue
+        print(f"   ✅ Final Krishna line: {line}")
+        used_texts.append(line)
 
-        used.append(candidate)
-        save_used_texts(used)
-        print("✅ Final chosen line:", candidate)
-        return candidate
+        if len(used_texts) > 1000:
+            used_texts = used_texts[-800:]
 
-    # अगर ऊपर से कुछ नहीं मिला तो example से ले लो
-    print("⚠️ Max attempts हो गए, example से लाइन ले रहे हैं।")
-    fallback = random.choice(EXAMPLE_LINES)
-    used.append(fallback)
-    save_used_texts(used)
+        save_used_texts(used_texts)
+        return line
+
+    fallback = "जब सब छूट जाए, तब भी श्रीकृष्ण साथ रहते हैं।  ♥"
+    print(f"⚠️ Using fallback line after {MAX_RETRIES} failed attempts: {fallback}")
     return fallback
 
 
-def main():
-    line = get_krishna_line()
-    print("\n✨ Krishna Hindi Line For Reel ✨")
-    print(line)
-
-
 if __name__ == "__main__":
-    main()
+    print(generate_unique_krishna_line())
