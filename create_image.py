@@ -13,7 +13,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ---------- GEMINI SETUP ----------
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-pro")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 PROMPT = """
 Generate one deep, positive, spiritual Hindi quote focused on Lord Krishna.
