@@ -5,8 +5,8 @@ on:
   schedule:
     # 7:00 AM IST = 01:30 UTC
     - cron: "30 1 * * *"
-    # 8:15 PM IST = 14:45 UTC
-    - cron: "45 14 * * *"
+    # 7:00 PM IST = 01:30 UTC
+    - cron: "30 13 * * *"
 
 jobs:
   build:
