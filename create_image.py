@@ -1,63 +1,95 @@
 import os
 import random
 from PIL import Image, ImageDraw, ImageFont
+import textwrap
 import google.generativeai as genai
 
-# ---------- CONFIG ----------
-IMAGE_DIR = "images"
-OUTPUT_DIR = "output"
+# =========================
+# CONFIG
+# =========================
+IMAGE_FOLDER = "images"
+OUTPUT_FOLDER = "output"
+OUTPUT_IMAGE = os.path.join(OUTPUT_FOLDER, "frame.png")
 FONT_PATH = "fonts/NotoSansDevanagari-Regular.ttf"
-CANVAS_SIZE = (1080, 1920)
+FONT_SIZE = 64
+MAX_TEXT_WIDTH = 900
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# ---------- GEMINI SETUP ----------
+# =========================
+# GEMINI SETUP
+# =========================
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("models/gemini-1.5-flash")
 
-PROMPT = """
-Generate one deep, positive, spiritual Hindi quote focused on Lord Krishna.
-Short 1–2 lines only.
-No emojis.
-No repeats.
-Pure devotional tone.
+# =========================
+# GENERATE KRISHNA HINDI LINE
+# =========================
+def generate_krishna_line():
+    prompt = """
+Write one deep, positive, spiritual Hindi quote about Lord Krishna.
+Rules:
+- Only Hindi
+- No English
+- No emojis
+- 1 or 2 short lines only
+- Must feel peaceful, devotional and powerful
 """
 
-def generate_krishna_line():
-    response = model.generate_content(PROMPT)
-    return response.text.strip()
+    response = model.generate_content(prompt)
+    text = response.text.strip()
+    return text
 
-# ---------- IMAGE PICKER ----------
-def pick_image():
-    images = [f for f in os.listdir(IMAGE_DIR) if f.endswith(".png")]
-    return os.path.join(IMAGE_DIR, random.choice(images))
+# =========================
+# PICK RANDOM IMAGE
+# =========================
+def pick_random_image():
+    images = [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(("png", "jpg", "jpeg"))]
+    if not images:
+        raise Exception("❌ No images found in images folder")
+    chosen = random.choice(images)
+    print("🖼 Using Krishna image:", chosen)
+    return os.path.join(IMAGE_FOLDER, chosen)
 
-# ---------- TEXT DRAW ----------
-def draw_text(image_path, text):
-    img = Image.open(image_path).convert("RGB")
-    img = img.resize(CANVAS_SIZE)
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(FONT_PATH, 48)
+# =========================
+# DRAW CENTERED TEXT
+# =========================
+def draw_centered_text(image, text):
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
 
-    y = 1500
-    for line in text.split("\n"):
-        w, h = draw.textbbox((0, 0), line, font=font)[2:]
-        draw.text(((1080 - w) / 2, y), line, fill="white", font=font)
-        y += 70
+    lines = textwrap.wrap(text, width=20)
+    total_height = sum(draw.textbbox((0, 0), line, font=font)[3] for line in lines)
 
-    out_path = os.path.join(OUTPUT_DIR, "frame.png")
-    img.save(out_path)
-    return out_path
+    y = (image.height - total_height) // 2
 
-# ---------- MAIN ----------
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        x = (image.width - (bbox[2] - bbox[0])) // 2
+        draw.text((x, y), line, font=font, fill="white", stroke_width=3, stroke_fill="black")
+        y += bbox[3]
+
+    return image
+
+# =========================
+# MAIN
+# =========================
 def main():
     print("🎨 Picking Krishna image...")
-    img = pick_image()
-    print("🕉️ Generating Krishna Hindi Quote via Gemini...")
-    text = generate_krishna_line()
-    print("📜 Quote:", text)
-    draw_text(img, text)
-    print("✅ Image created successfully!")
+    img_path = pick_random_image()
+
+    print("🕉 Generating Krishna Hindi Quote via Gemini...")
+    line = generate_krishna_line()
+    print("📜 Quote:", line)
+
+    print("🖼 Creating 1080x1920 reel frame...")
+    base_img = Image.open(img_path).convert("RGB")
+    base_img = base_img.resize((1080, 1920))
+
+    final_img = draw_centered_text(base_img, line)
+    final_img.save(OUTPUT_IMAGE)
+
+    print("✅ Image created:", OUTPUT_IMAGE)
 
 if __name__ == "__main__":
     main()
