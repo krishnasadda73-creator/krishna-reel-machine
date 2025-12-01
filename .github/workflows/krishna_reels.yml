@@ -44,4 +44,4 @@ jobs:
         run: python create_video.py
 
       - name: Upload to YouTube
-        run: python youtube_upload.py output/reel.mp4
+        run: python youtube_upload.py output/krishna_reel.mp4
