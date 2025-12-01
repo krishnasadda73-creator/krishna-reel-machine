@@ -3,9 +3,9 @@ name: Krishna Reels Auto Upload
 on:
   workflow_dispatch:
   schedule:
-    # 7:00 AM IST = 1:30 UTC
+    # 07:00 AM IST  -> 01:30 UTC
     - cron: "30 1 * * *"
-    # 8:15 PM IST = 14:45 UTC
+    # 08:15 PM IST  -> 14:45 UTC
     - cron: "45 14 * * *"
 
 jobs:
@@ -13,57 +13,75 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install system dependencies (ffmpeg + fonts)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-color-emoji
+      - name: Install system dependencies (ffmpeg + fonts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            fonts-noto-core \
+            fonts-noto-color-emoji \
+            fonts-dejavu-core
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Load API keys from GitHub secrets
-      run: |
-        echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> $GITHUB_ENV
-        echo "YT_CLIENT_ID=${{ secrets.YT_CLIENT_ID }}" >> $GITHUB_ENV
-        echo "YT_CLIENT_SECRET=${{ secrets.YT_CLIENT_SECRET }}" >> $GITHUB_ENV
-        echo "YT_REFRESH_TOKEN=${{ secrets.YT_REFRESH_TOKEN }}" >> $GITHUB_ENV
+      - name: Load API keys from GitHub secrets
+        run: |
+          echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> $GITHUB_ENV
+          echo "YT_CLIENT_ID=${{ secrets.YT_CLIENT_ID }}" >> $GITHUB_ENV
+          echo "YT_CLIENT_SECRET=${{ secrets.YT_CLIENT_SECRET }}" >> $GITHUB_ENV
+          echo "YT_REFRESH_TOKEN=${{ secrets.YT_REFRESH_TOKEN }}" >> $GITHUB_ENV
 
-    # ✅ STEP 1 — MUST RUN FIRST (CREATES last_line.txt)
-    - name: Generate Krishna Hindi Text
-      run: |
-        python generate_text.py
+      - name: Generate Krishna Hindi Text
+        run: |
+          python generate_text.py
 
-    # ✅ STEP 2 — SAFE TO USE NOW
-    - name: Generate Krishna Image Frame (Image + Hindi Text)
-      run: |
-        python create_image.py
+      - name: Generate Krishna Image Frame (image + Hindi text)
+        run: |
+          python create_image.py
 
-    # ✅ STEP 3 — CREATE VIDEO
-    - name: Create Reel Video with BGM
-      run: |
-        python create_video.py
+      - name: Create Reel Video with BGM
+        run: |
+          # makes sure output folder exists
+          mkdir -p output
+          python create_video.py
 
-    # ✅ OPTIONAL: SAVE VIDEO AS ARTIFACT
-    - name: Upload reel as artifact (optional)
-      uses: actions/upload-artifact@v4
-      with:
-        name: krishna-reel
-        path: output/reel.mp4
+      - name: Debug output folder
+        run: |
+          echo "Contents of repo root:"
+          ls -R
+          echo "Contents of output/:"
+          ls -lh output || echo "no output folder"
 
-    # ✅ STEP 4 — YOUTUBE AUTO UPLOAD
-    - name: Upload reel to YouTube
-      run: |
-        python youtube_upload.py output/reel.mp4
+      - name: Upload reel as artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: krishna-reel
+          path: output/*.mp4
+          if-no-files-found: warn
 
-    - name: Complete job
-      run: echo "✅ Krishna Reel Uploaded Successfully"
+      - name: Upload reel to YouTube
+        run: |
+          mkdir -p output
+          echo "Looking for MP4 file in output/..."
+          VIDEO_FILE=$(ls output/*.mp4 2>/dev/null | head -n 1 || true)
+
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ Video file not found in output/."
+            echo "Listing everything for debugging:"
+            ls -R
+            exit 1
+          fi
+
+          echo "✅ Found video: $VIDEO_FILE"
+          python youtube_upload.py "$VIDEO_FILE"
