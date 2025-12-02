@@ -2,11 +2,6 @@ name: Krishna Reels Auto Upload
 
 on:
   workflow_dispatch:
-  schedule:
-    # 7:00 AM IST = 01:30 UTC
-    - cron: "30 1 * * *"
-    # 7:00 PM IST = 01:30 UTC
-    - cron: "30 13 * * *"
 
 jobs:
   build:
